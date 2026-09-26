@@ -1,0 +1,56 @@
+{
+  "rabbit_channel": [
+    {
+      "id": "cord-protector-sleeve",
+      "title": "Heavy-Duty Split Woven Cord Protector Tubing (10m)",
+      "price": "£9.99",
+      "badge": "Pip-Proof Tested",
+      "comment_keyword": "CORD",
+      "min_age_days": 50,
+      "max_age_days": 9999,
+      "image_url": "https://images.unsplash.com/photo-1585110396000-c9ffd4e4b308?w=300&auto=format&fit=crop&q=80",
+      "affiliate_url": "https://www.amazon.co.uk/dp/B0EXAMPLE1?tag=yourtag-21",
+      "keywords": ["chew", "cable", "cord", "charger", "wire", "teen", "rabbit proof"]
+    },
+    {
+      "id": "wooden-hay-feeder",
+      "title": "3-in-1 Solid Oak Rabbit Hay Feeder & Litter Station",
+      "price": "£26.99",
+      "badge": "Zero Hay Waste",
+      "comment_keyword": "HAY",
+      "min_age_days": 56,
+      "max_age_days": 9999,
+      "image_url": "https://images.unsplash.com/photo-1535241749838-299277b6305f?w=300&auto=format&fit=crop&q=80",
+      "affiliate_url": "https://www.amazon.co.uk/dp/B0EXAMPLE2?tag=yourtag-21",
+      "keywords": ["hay", "litter", "poop", "mess", "clean", "smell", "feeder"]
+    }
+  ],
+  "cat_channel": [
+    {
+      "id": "steel-cat-fountain",
+      "title": "Ultra-Quiet 304 Stainless Steel Cat Water Fountain",
+      "price": "£27.99",
+      "badge": "Biscuit Approved",
+      "comment_keyword": "WATER",
+      "min_age_days": 56,
+      "max_age_days": 9999,
+      "image_url": "https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=300&auto=format&fit=crop&q=80",
+      "affiliate_url": "https://www.amazon.co.uk/dp/B0EXAMPLE3?tag=yourtag-21",
+      "keywords": ["water", "fountain", "tap", "hydration", "sink", "bowl"]
+    }
+  ],
+  "dog_channel": [
+    {
+      "id": "indestructible-chew-ring",
+      "title": "Natural Rubber Heavy-Chewer Ring Toy",
+      "price": "£14.99",
+      "badge": "Buster Tested",
+      "comment_keyword": "CHEW",
+      "min_age_days": 56,
+      "max_age_days": 9999,
+      "image_url": "https://images.unsplash.com/photo-1535930891776-0c2dfb7fda1a?w=300&auto=format&fit=crop&q=80",
+      "affiliate_url": "https://www.amazon.co.uk/dp/B0EXAMPLE4?tag=yourtag-21",
+      "keywords": ["chew", "destroy", "teething", "toy", "bored"]
+    }
+  ]
+}

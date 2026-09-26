@@ -1,0 +1,29 @@
+{
+  "hq_issue_number": 0,
+  "channels": {
+    "rabbit_channel": {
+      "maturity_phase": "PHASE_1_INCUBATION",
+      "followers": 0,
+      "total_views_7d": 0,
+      "episode_number": 1,
+      "best_script_example": "[sigh] Raising three baby rabbits in a one-bed flat sounded peaceful until Pip learned he can clear a two-foot playpen from a standing start—which is why",
+      "preferred_angle": "sibling_chaos"
+    },
+    "cat_channel": {
+      "maturity_phase": "PHASE_1_INCUBATION",
+      "followers": 0,
+      "total_views_7d": 0,
+      "episode_number": 1,
+      "best_script_example": "[laughing] Nobody warns you that adopting three kittens means zero privacy, especially when Biscuit discovers the bathroom tap—and that is why",
+      "preferred_angle": "sibling_chaos"
+    },
+    "dog_channel": {
+      "maturity_phase": "PHASE_1_INCUBATION",
+      "followers": 0,
+      "total_views_7d": 0,
+      "episode_number": 1,
+      "best_script_example": "[sigh] Three dogs, one rainy English garden, and Nugget flatly refuses to let his paws touch wet grass—which is honestly why",
+      "preferred_angle": "sibling_chaos"
+    }
+  }
+}
