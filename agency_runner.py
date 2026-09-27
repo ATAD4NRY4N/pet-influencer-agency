@@ -3,13 +3,11 @@ import re
 import json
 import time
 import shutil
-import asyncio
 import subprocess
 import urllib.parse
 from datetime import datetime, timezone
 import requests
 import feedparser
-import edge_tts
 
 try:
     from openai import OpenAI
@@ -20,17 +18,11 @@ except Exception:
 from src.openrouter_media import (
     MediaGenerationError,
     generate_beat_image,
-    synthesize_speech,
     validate_image,
 )
 from src.motion import MOTION_THRESHOLD, MotionError, generate_i2v_clip, measure_motion
+from src.pet_music import MOODS as MUSIC_MOODS, mood_for_action, write_music_wav
 import src.billing as billing
-
-try:
-    from gradio_client import Client, handle_file
-    HAS_GRADIO = True
-except Exception:
-    HAS_GRADIO = False
 
 STATE_DIR = "state"
 DOCS_DIR = "docs"
@@ -44,62 +36,108 @@ TICKS_PER_SECOND = 10_000_000
 DEFAULT_BIBLE = {
     "rabbit_channel": {
         "enabled": True,
-        "channel_name": "Maya & The Buns",
-        "handle": "@MayaAndTheBuns",
+        "channel_name": "The Buns",
+        "handle": "@TheBunsDaily",
         "bio_slug": "barnaby",
         "master_seed": 884102,
-        "human": {
-            "name": "Maya",
-            "age": 26,
-            "fish_voice_id": "7f92f8afb8ec43bf81429cc1c9199cb1",
-            "edge_voice": "en-GB-LibbyNeural",
-            "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with light nose-bridge freckles, hazel-green eyes behind thin round matte-gold wireframe glasses, wavy chestnut hair pulled half-up in a tortoiseshell claw clip",
-            "expressions": {
-                "SMILE_WARM": "candid warm closed-lip smile looking down affectionately",
-                "SMILE_LAUGH": "candid natural mid-laugh expression covering mouth slightly with one hand",
-                "EXPRESSION_DEADPAN": "candid exasperated side-eye expression looking at the floor"
-            },
-            "wardrobe_rotation": [
-                "oversized sage-green chunky waffle-knit cardigan over a white crewneck tee",
-                "oatmeal ribbed crewneck jumper with rolled sleeves"
-            ]
-        },
+        "cast_policy": "ANIMALS_ONLY",
+        "cast_policy_note": "No human, no face, no hands, no owner appears in any image or video. Maya is the (unseen) owner and is never rendered. Every beat is rabbits only.",
+        "music_policy": "Light-hearted instrumental background music generated per episode. No voiceover, no narration, no on-screen speech captions.",
         "locations": {
-            "SET_A_SOFA": "bright Scandi cottage living room, oatmeal boucle sofa, matte sage-green panelled wall behind, potted monstera plant on left, warm window daylight",
-            "SET_B_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets and white subway tile splashback, morning daylight",
-            "SET_C_RUG_POV": "high-angle first-person iPhone POV shot looking down at a braided cream jute rug over herringbone oak flooring, black wire playpen panel in background"
+            "SET_RUG_POV": "high-angle first-person iPhone POV looking down at a braided cream jute rug over herringbone oak flooring, black wire playpen panel in background, warm window daylight",
+            "SET_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets and white subway tile splashback, soft morning daylight, no people",
+            "SET_LIVING": "bright Scandi cottage living room, oatmeal boucle sofa, matte sage-green panelled wall behind, potted monstera plant, warm window daylight, no people"
         },
         "pets": [
-            {
-                "id": "pip",
-                "name": "Pip",
-                "breed": "Lionhead Rabbit",
-                "birth_date": "2026-07-15",
-                "pet_seed": 420882,
-                "role": "The cable-chewing chaos gremlin",
-                "immutable_marking_dna": "single jet-black Lionhead rabbit with short upright black ears and a distinct snow-white fluffy mane tuft right between his ears"
-            },
             {
                 "id": "barnaby",
                 "name": "Barnaby",
                 "breed": "Holland Lop Rabbit",
+                "species": "rabbit",
                 "birth_date": "2026-05-10",
                 "pet_seed": 420881,
                 "role": "The polite food critic",
-                "immutable_marking_dna": "single cream-white Holland Lop rabbit with floppy lop ears where ONLY the left ear is dark charcoal-grey and the right ear is cream"
+                "immutable_marking_dna": "one single cream-white Holland Lop rabbit with long floppy lop ears, where ONLY the left ear is dark charcoal-grey and the right ear is cream white, pink nose, dark round eyes, dense soft plush fur",
+                "grounder": "exactly one rabbit, full body and face clearly visible, short upright fluffy coat, same charcoal-grey left ear in every shot"
+            },
+            {
+                "id": "pip",
+                "name": "Pip",
+                "breed": "Lionhead Rabbit",
+                "species": "rabbit",
+                "birth_date": "2026-07-15",
+                "pet_seed": 420882,
+                "role": "The cable-chewing chaos gremlin",
+                "immutable_marking_dna": "one single jet-black Lionhead rabbit with short upright black ears, a distinct snow-white fluffy mane tuft right between his ears, and a black nose, dark round eyes",
+                "grounder": "exactly one rabbit, full body and face clearly visible, the white mane tuft between the ears visible in every shot"
             },
             {
                 "id": "clover",
                 "name": "Clover",
                 "breed": "Dutch Rabbit",
+                "species": "rabbit",
                 "birth_date": "2026-07-15",
                 "pet_seed": 420883,
                 "role": "The zoomie queen",
-                "immutable_marking_dna": "single cinnamon-amber and white Dutch rabbit with a crisp white shoulder saddle and white nose blaze"
+                "immutable_marking_dna": "one single cinnamon-amber and white Dutch rabbit with a crisp white shoulder saddle, a white nose blaze running up the face, white front paws, and dark round eyes",
+                "grounder": "exactly one rabbit, full body and face clearly visible, the white shoulder saddle and nose blaze visible in every shot"
             }
         ]
     }
 }
+
+# The channel is animals-only. This is a hard requirement, not a preference:
+# issue #8 shipped a human/rabbit hybrid creature because a single word in a
+# prompt was enough to summon a person back into the frame. Rather than trust
+# every future prompt to be written carefully, every prompt that reaches an
+# image or video model is checked against this list first, and a hit aborts the
+# reel. Failing the whole episode is the correct outcome - a reel that quietly
+# grew a person in it is exactly the failure we are preventing.
+NO_HUMAN_TERMS = (
+    "human", "humans", "person", "persons", "people", "woman", "women",
+    "man", "men", "girl", "girls", "boy", "boys", "lady", "ladies",
+    "gentleman", "owner", "owners", "maya", "face dna", "portrait of",
+    "hand", "hands", "arm", "arms", "finger", "fingers", "child", "children",
+    "crowd", "family", "kid", "kids", "selfie", "vlogger", "creator",
+)
+
+# Terms match only on word boundaries, and specifically NOT after a hyphen or
+# another word character. A plain substring search is useless here, and so is a
+# loose suffix:
+#   "first-person iPhone POV" contains "person"   -> blocked by the lookbehind
+#   "warm window daylight"    contains "arm"      -> blocked by the lookbehind
+#   "snow-white fluffy mane"  contains "man"      -> blocked by the trailing \b
+# All three appear in legitimate animal-only prompts, and Pip is a Lionhead
+# whose defining feature is a "mane tuft", so a guard that fires on those
+# rejects every episode. The guard has to be sharp enough that it never cries
+# wolf, because a guard that cries wolf gets switched off.
+_NO_HUMAN_RE = re.compile(
+    r"(?<![-\w])(" + "|".join(re.escape(t) for t in NO_HUMAN_TERMS) + r")\b"
+)
+
+
+class CastPolicyError(RuntimeError):
+    """A prompt or render asked for a human in an animals-only channel."""
+
+
+def assert_animal_only(text: str, where: str) -> str:
+    """Reject any prompt naming a person, so a reel never grows a face."""
+    low = (text or "").lower()
+    hits = []
+    for m in _NO_HUMAN_RE.finditer(low):
+        # "no people" / "zero human hands" are negations - they are the whole
+        # point of putting them in the prompt, so they are not a hit.
+        prefix = low[max(0, m.start() - 5):m.start()].strip()
+        if prefix.endswith(("no", "zero", "without", "nobody", "not", "never")):
+            continue
+        hits.append(m.group(0))
+    if hits:
+        raise CastPolicyError(
+            f"{where} prompt names a human ({', '.join(sorted(set(hits)))}). "
+            f"This channel is animals-only; the reel was not rendered."
+        )
+    return text
+
 
 DEFAULT_CATALOG = {
     "rabbit_channel": [
@@ -189,28 +227,54 @@ FREE_LLM_WATERFALL = [
     "deepseek/deepseek-chat-v3-0324:free",
 ]
 
-def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary: str, trend: str) -> dict:
+def write_daily_episode_plan(channel_meta: dict, chosen_pets: list[dict], age_summary: str, trend: str) -> dict:
+    """Plan one silent, animals-only episode.
+
+    There is no voiceover and no spoken script any more. What an LLM contributes
+    is the plan the visuals and the music follow: which pet is on screen, what
+    it is doing, and a short hook for the on-screen text. The words are kept to a
+    caption, never spoken, because a narration track is what the channel used to
+    build its identity around and the whole point of the change is that the
+    animals are the content.
+
+    Every action is checked against the animals-only cast policy before it is
+    returned, so a model that volunteers a person loses the whole reel rather
+    than quietly reintroducing one.
+    """
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    human_name = channel_meta.get("human", {}).get("name", "Maya")
-    p1 = chosen_pets[0]["name"]
-    p2 = chosen_pets[1]["name"] if len(chosen_pets) > 1 else chosen_pets[0]["name"]
+    by_id = {p["id"]: p for p in chosen_pets}
+    p1 = chosen_pets[0]
+    p2 = chosen_pets[1] if len(chosen_pets) > 1 else chosen_pets[0]
 
     if HAS_OPENAI and api_key:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+        roster = "\n".join(
+            f"- {p['name']} (id={p['id']}): {p['breed']}. Locked look: {p['immutable_marking_dna']}"
+            for p in chosen_pets
+        )
         prompt = (
-            f"Write a 34-word vertical TikTok POV vlog voiceover for {human_name} (26yo UK creator) filming her rabbits {p1} and {p2}.\n"
-            f"Current Pet Ages:\n{age_summary}\nTopic: {trend}\n"
+            "Plan one 9-second vertical silent video for a pet-only Instagram/TikTok "
+            "account. There is NO voiceover, NO narration and NO spoken audio - only "
+            f"upbeat background music and on-screen text.\n\n"
+            f"Cast (do not invent animals outside this list):\n{roster}\n\n"
+            f"Current ages:\n{age_summary}\n\nLoose inspiration (do not mention on screen): {trend}\n\n"
             "Rules:\n"
-            "1. Conversational UK English ('flat', 'proper', 'sorted'). NO emojis in hook_text.\n"
-            "2. Contrast how the two rabbits behave.\n"
-            "3. End with a relatable question for pet owners in the comments.\n"
-            "4. Include exactly one inline emotion tag such as [sigh], [laughing] or [excited]. "
-            "The voice model performs these literally, and they are stripped from the "
-            "on-screen captions, so place them where a real person would react.\n"
-            "Return ONLY valid JSON:\n"
-            '{"script": "spoken words...", "hook_text": "4 WORD ASCII HOOK", '
-            '"pet1_action": "chewing a cardboard box corner on the jute rug", '
-            '"pet2_action": "sitting politely next to a ceramic water bowl on the rug"}'
+            "1. Return exactly 3 beats. Each beat names one pet_id from the cast list above.\n"
+            "2. Two beats may use the SAME pet_id (the same animal appearing more than "
+            "once in one video is fine and encouraged).\n"
+            "3. Each action is a short physical behaviour of that animal only: chewing, "
+            "nuzzling, loafing, zoomies, digging, grooming, flopping over. Never a human "
+            "action and never a human in shot.\n"
+            "4. hook_text is 2-4 ASCII WORDS, no emoji, that would work as a text overlay.\n"
+            "5. music_mood for each beat is one of: playful, curious, calm, sleepy.\n"
+            "Return ONLY valid JSON, no prose:\n"
+            '{"hook_text": "BUNNY BUDGET CHECK", "beats": ['
+            '{"pet_id": "barnaby", "action": "nudging a full hay rack with his nose", '
+            '"motion": "slowly chewing, ears bobbing gently", "music_mood": "calm"}, '
+            '{"pet_id": "pip", "action": "full zoomies across the jute rug", '
+            '"motion": "bounding and skidding, ears flying", "music_mood": "playful"}, '
+            '{"pet_id": "pip", "action": "flopping over mid-run for a dramatic nap", '
+            '"motion": "slowly sinking into a flat loaf, eyes closing", "music_mood": "sleepy"}]}'
         )
         for m in FREE_LLM_WATERFALL:
             for attempt in range(2):
@@ -218,11 +282,22 @@ def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary:
                     r = client.chat.completions.create(model=m, messages=[{"role": "user", "content": prompt}], timeout=30)
                     raw = r.choices[0].message.content or ""
                     match = re.search(r"\{.*\}", raw, re.DOTALL)
-                    if match:
-                        data = json.loads(match.group(0))
-                        if "script" in data and "hook_text" in data:
-                            return data
-                    break
+                    if not match:
+                        break
+                    data = json.loads(match.group(0))
+                    beats = data.get("beats") or []
+                    if len(beats) != 3 or not data.get("hook_text"):
+                        break
+                    # Every beat must name a real cast member, or we cannot
+                    # ground the animal at all.
+                    if any(b.get("pet_id") not in by_id for b in beats):
+                        print(f"Model {m} returned a pet_id outside the cast - discarding")
+                        break
+                    for b in beats:
+                        assert_animal_only(f"{b.get('action','')} {b.get('motion','')}", f"{m} beat")
+                    return data
+                except CastPolicyError:
+                    raise
                 except Exception as e:
                     # Free models are rate limited hard and 429 is routine, not
                     # fatal - back off and give the next model a turn.
@@ -234,14 +309,20 @@ def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary:
                     break
 
     return {
-        "script": f"Day 44 in the flat, and {p1} just proved playpen fences are purely decorative while {p2} sat watching like the landlord. Which of your pets is the chaos gremlin?",
-        "hook_text": "3 RABBITS IN ONE FLAT",
-        "pet1_action": "investigating a wire playpen fence on the cream jute rug",
-        "pet2_action": "loafing calmly next to fresh green basil on the oak floor"
+        "hook_text": "BUNNY BUDGET CHECK",
+        "beats": [
+            {"pet_id": p1["id"], "action": "nudging a full hay rack with his nose",
+             "motion": "slowly chewing, ears bobbing gently", "music_mood": "calm"},
+            {"pet_id": p2["id"], "action": "full zoomies across the jute rug",
+             "motion": "bounding and skidding, ears flying", "music_mood": "playful"},
+            {"pet_id": p2["id"], "action": "flopping over mid-run for a dramatic nap",
+             "motion": "slowly sinking into a flat loaf, eyes closing", "music_mood": "sleepy"},
+        ],
     }
 
 # =====================================================================
-# 1. VOICE & SUBTITLES (Fish Audio S2.1 Pro Free -> Edge-TTS + ASCII .ass)
+# 1. SILENT REELS: on-screen text only. There is no voiceover and no narration,
+#    so there is no voice model, no cloning reference and no speech captions.
 # =====================================================================
 def format_ass_time(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -253,276 +334,15 @@ def format_ass_time(seconds: float) -> str:
         cs = 0
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def probe_duration(audio_path: str, default: float = 9.0) -> float:
-    """Measured length of a rendered audio file, in seconds."""
-    try:
-        out = subprocess.check_output([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
-        ]).strip()
-        value = float(out)
-        return value if value > 0.5 else default
-    except Exception:
-        return default
-
-
-def words_from_text(text: str) -> list[dict]:
-    """Split spoken text into the same word records Edge-TTS would have produced."""
-    tokens = strip_non_ascii(re.sub(r"[^\w\s']", " ", text)).upper().split()
-    return [{"text": t, "start": 0.0, "end": 0.0} for t in tokens if t]
-
-
-def rescale_word_timings(words: list[dict], duration: float) -> list[dict]:
-    """Lay words out across `duration`, weighting by length plus a pause budget.
-
-    Edge-TTS gives us real WordBoundary offsets. The OpenRouter and Fish voices
-    do not, and previously that meant the burned-in captions were either frozen
-    or anchored to the wrong clip - captions drifting out of sync with the voice
-    is one of the loudest "this is fake" signals there is.
-    """
-    if not words:
-        return words
-    # +2.2 approximates the inter-word gap a natural speaking voice leaves.
-    weights = [len(w["text"]) + 2.2 for w in words]
-    total = sum(weights) or 1.0
-    cursor = 0.0
-    for word, weight in zip(words, weights):
-        span = duration * (weight / total)
-        word["start"] = round(cursor, 3)
-        word["end"] = round(cursor + span, 3)
-        cursor += span
-    return words
-
-
-async def ensure_voice_reference(voice_ref_path: str, edge_voice: str) -> str:
-    """Create the one-off voice sample that Fish clones from, once.
-
-    Edge-TTS renders a short neutral clip the first time only. Every later
-    episode passes that same clip as a cloning reference, so the channel keeps
-    a single consistent voice without ever paying for a custom voice plan.
-
-    This MUST be a coroutine. It is called from generate_voice_and_captions(),
-    which is itself driven by asyncio.run(). The previous version was a plain
-    function that called asyncio.run() internally, which always raises
-    "asyncio.run() cannot be called from a running event loop" - and because
-    the coroutine was built as that call's argument, it was then never awaited
-    (the RuntimeWarning in the run log). The resulting exception was caught by
-    a broad `except Exception` that reported "OpenRouter TTS unavailable", so
-    the free OpenRouter TTS rung silently never ran and every episode fell
-    back to Fish/Edge without anyone noticing.
-    """
-    os.makedirs(os.path.dirname(voice_ref_path), exist_ok=True)
-    if os.path.exists(voice_ref_path) and os.path.getsize(voice_ref_path) > 5_000:
-        return voice_ref_path
-
-    from src.openrouter_media import VOICE_REFERENCE_TRANSCRIPT
-
-    communicate = edge_tts.Communicate(VOICE_REFERENCE_TRANSCRIPT, edge_voice, rate="+0%", pitch="+0Hz")
-    written = 0
-    with open(voice_ref_path, "wb") as f:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                f.write(chunk["data"])
-                written += len(chunk["data"])
-
-    if written < 5_000:
-        raise RuntimeError(f"voice reference render produced only {written} bytes")
-    print(f"Bootstrapped voice-clone reference at {voice_ref_path} ({written // 1024} KB)")
-    return voice_ref_path
-
-
-async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_cfg: dict, audio_path: str, ass_path: str):
-    clean_spoken = re.sub(r"\[.*?\]", "", raw_script).strip()
-    voice_name = human_cfg.get("edge_voice", "en-GB-LibbyNeural")
-    fish_key = os.environ.get("FISH_API_KEY", "").strip()
-    used_fish = False
-    used_openrouter = False
-    voice_ref = os.path.join(MEDIA_DIR, "maya_voice_ref.mp3")
-
-    # 0. OpenRouter free-tier TTS. Fish is tried first because it is the only
-    # rung that can clone a voice, which is what keeps one recognisable voice
-    # across the whole channel instead of a new stranger every episode.
-    if os.environ.get("OPENROUTER_API_KEY", "").strip():
-        try:
-            await ensure_voice_reference(voice_ref, voice_name)
-            result = synthesize_speech(
-                raw_script,
-                audio_path,
-                os.environ.get("FLUX_TTS_VOICE", "").strip(),
-                voice_ref,
-            )
-            used_openrouter = True
-            print(f"TTS via OpenRouter: {result['provider']}")
-        except Exception as e:
-            print(f"OpenRouter TTS unavailable ({str(e)[:140]}) - falling back")
-    else:
-        print("OPENROUTER_API_KEY not set - using Fish direct / Edge-TTS")
-
-    # 1A. Try Fish Audio S2.1 Pro Free Direct API if FISH_API_KEY is configured
-    if fish_key:
-        try:
-            r = requests.post(
-                "https://api.fish.audio/v1/tts",
-                headers={"Authorization": f"Bearer {fish_key}", "Content-Type": "application/json", "model": "s2.1-pro-free"},
-                json={"text": raw_script, "reference_id": human_cfg.get("fish_voice_id"), "format": "mp3"},
-                timeout=30
-            )
-            if r.status_code == 200 and len(r.content) > 2000:
-                with open(audio_path, "wb") as f:
-                    f.write(r.content)
-                used_fish = True
-                print("✅ Voice synthesized via Fish Audio S2.1 Pro Free!")
-        except Exception as e:
-            print(f"⚠️ Fish Audio direct skipped: {e}")
-
-    # 1B. Run Edge-TTS WordBoundary stream (generates audio if Fish wasn't used, and always provides exact word timings)
-    words = []
-    temp_edge_audio = f"{audio_path}.edge.mp3"
-    try:
-        communicate = edge_tts.Communicate(clean_spoken, voice_name, rate="+4%", pitch="+2Hz", boundary="WordBoundary")
-        with open(temp_edge_audio, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    w_txt = strip_non_ascii(re.sub(r"[^\w\s']", "", chunk["text"])).upper()
-                    if w_txt:
-                        s_sec = chunk["offset"] / TICKS_PER_SECOND
-                        d_sec = chunk["duration"] / TICKS_PER_SECOND
-                        words.append({"text": w_txt, "start": s_sec, "end": s_sec + d_sec})
-        if not (used_fish or used_openrouter) and os.path.exists(temp_edge_audio) and os.path.getsize(temp_edge_audio) > 500:
-            shutil.move(temp_edge_audio, audio_path)
-    except Exception as e:
-        print(f"⚠️ Edge-TTS fallback: {e}")
-        if not os.path.exists(audio_path):
-            # A silent reel is worse than no reel: the captions would desync
-            # against nothing and the watch page would ship a broken draft.
-            raise MediaGenerationError(
-                "no TTS provider produced usable audio; refusing to publish a silent reel"
-            )
-
-    # Build strictly ASCII .ass subtitles (No emojis -> Zero [□] boxes!)
-    ass_lines = [
-        "[Script Info]", "ScriptType: v4.00+", "PlayResX: 720", "PlayResY: 1280", "WrapStyle: 1", "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,3,2,50,50,260,1",
-        "Style: HookBanner,DejaVu Sans,38,&H0000FFFF,&H0000FFFF,&H001E293B,&H001E293B,-1,0,0,0,100,100,1,0,3,16,0,8,40,40,120,1",
-        "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
-    ]
-
-    # The OpenRouter and Fish-direct voices do not report per-word offsets, so
-    # when one of them is the active voice we lay the words out across the real
-    # measured audio duration. Weighting by length plus a fixed per-word gap
-    # tracks natural pacing far better than a flat split.
-    if used_openrouter or used_fish:
-        words = rescale_word_timings(words_from_text(clean_spoken), probe_duration(audio_path))
-
-    clean_hook = strip_non_ascii(hook_banner).upper()[:30] or "MAYA AND THE BUNS"
-    ass_lines.append(f"Dialogue: 1,0:00:00.00,0:00:03.20,HookBanner,,0,0,0,,{clean_hook}")
-
-    idx = 0
-    while idx < len(words):
-        grp = words[idx : idx + 2] if sum(len(w["text"]) for w in words[idx : idx + 3]) > 13 else words[idx : idx + 3]
-        idx += len(grp)
-        for active_idx, target in enumerate(grp):
-            t_start = target["start"]
-            t_end = grp[active_idx + 1]["start"] if active_idx + 1 < len(grp) else target["end"] + 0.15
-            tokens = [
-                f"{{\\c&H00FFFF&\\fscx100\\fscy100\\t(0,65,\\fscx116\\fscy116)}}{w['text']}{{\\c&HFFFFFF&\\fscx100\\fscy100}}"
-                if j == active_idx else w["text"]
-                for j, w in enumerate(grp)
-            ]
-            ass_lines.append(f"Dialogue: 0,{format_ass_time(t_start)},{format_ass_time(t_end)},TikTok,,0,0,0,,{' '.join(tokens)}")
-
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(ass_lines))
-
 # =====================================================================
-# 2. FACE-LOCK (PuLID-Flux), NATIVE 9:16 FLUX, & LTX-VIDEO ANIMATOR
+# 2. ANIMAL-ONLY 9:16 STILLS & LTX-VIDEO ANIMATOR
+#    The cast is entirely animals, so there is no face lock to keep. What holds
+#    a character steady instead is the pet's own marking DNA plus its fixed seed.
 # =====================================================================
 def fetch_flux_image(prompt: str, seed: int, out_path: str):
     """Render one beat through the validated provider ladder. Raises on failure."""
     return generate_beat_image(prompt, seed, out_path)
 
-
-def ensure_maya_master_face(c_data: dict) -> str:
-    """
-    Creates ONE permanent canonical portrait of Maya (docs/media/maya_master.jpg).
-    If it already exists in the repo, it is reused so Maya's face NEVER drifts.
-    """
-    os.makedirs(MEDIA_DIR, exist_ok=True)
-    master_face_path = f"{MEDIA_DIR}/maya_master.jpg"
-    if os.path.exists(master_face_path) and os.path.getsize(master_face_path) > 15_000:
-        return master_face_path
-
-    human = c_data["human"]
-    loc = c_data["locations"]["SET_A_SOFA"]
-    outfit = human["wardrobe_rotation"][0]
-    prompt = (
-        f"{loc}, candid vertical iPhone portrait of {human['immutable_face_dna']}, "
-        f"{human['expressions']['SMILE_WARM']}, wearing {outfit}, warm natural window light"
-    )
-    fetch_flux_image(prompt, c_data.get("master_seed", 884102), master_face_path)
-    return master_face_path
-
-def generate_maya_scene_with_pulid(master_face_path: str, prompt: str, seed: int, out_path: str):
-    """
-    Renders a NEW reaction shot that still reads as Maya.
-
-    Identity is carried by handing the model the canonical portrait as a
-    reference image, which is the only thing in this pipeline that can actually
-    hold a face steady. The previous version caught every failure and quietly
-    copied the master portrait into the beat slot, so "Beat 1 (Face-Locked
-    Maya)" was literally the same JPEG as maya_master.jpg - byte for byte - and
-    the channel never changed expression, pose or framing at all.
-
-    If nothing can render, this raises. It must never substitute the master.
-    """
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
-    if HAS_GRADIO:
-        for space_id in ["yanze/PuLID-Flux", "ByteDance/Hyper-FLUX-8Steps-LoRA"]:
-            try:
-                client = Client(space_id, hf_token=hf_token or None)
-                if "PuLID" in space_id:
-                    job = client.submit(
-                        prompt=prompt,
-                        id_image=handle_file(master_face_path),
-                        start_step=2,
-                        guidance=4.0,
-                        seed=seed,
-                        true_cfg=1.0,
-                        width=768,
-                        height=1344,
-                        num_steps=16,
-                        id_weight=1.0,
-                        neg_prompt="bad quality, deformed, watermark, cartoon",
-                        timestep_to_start_cfg=1,
-                        max_sequence_length=128
-                    )
-                    res = job.result(timeout=75)
-                    img_file = res[0] if isinstance(res, (list, tuple)) else res
-                    if isinstance(img_file, dict) and "path" in img_file:
-                        img_file = img_file["path"]
-                    if img_file and os.path.exists(str(img_file)):
-                        shutil.copy(str(img_file), out_path)
-                        print("✅ Generated face-locked Maya frame via PuLID-Flux!")
-                        return
-            except Exception as e:
-                print(f"ℹ️ PuLID Space busy ({e}), using canonical master portrait lock.")
-                break
-
-    # PuLID ZeroGPU is queue-saturated in practice, which is exactly why the run
-    # in issue #6 ended up here every time. Fall through to the OpenRouter image
-    # API, which accepts the same reference portrait and is not queue-bound.
-    generate_beat_image(
-        prompt,
-        seed,
-        out_path,
-        reference_path=master_face_path,
-    )
 
 def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, out_mp4: str, pan_dir: int = 1) -> str:
     """
@@ -582,54 +402,45 @@ def _camera_drift(img_path: str, duration_sec: float, out_mp4: str, pan_dir: int
 # =====================================================================
 # 3. MASTER VIDEO COMPILER (POV + Reaction Cutaway Pacing)
 # =====================================================================
-def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: dict, script_data: dict) -> dict:
+def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: dict, plan: dict) -> dict:
+    """Render one silent, animals-only episode.
+
+    Structure is unchanged from the voiced version - three beats, crossfaded -
+    but every beat is now an animal, and the soundtrack is generated music rather
+    than a voiceover. Because there is no narration to fit, the beat lengths are
+    fixed rather than derived from an audio duration, which also stops one slow
+    beat from swallowing the whole reel.
+    """
     os.makedirs(MEDIA_DIR, exist_ok=True)
     os.makedirs("output", exist_ok=True)
 
-    audio_path = f"output/{c_key}.mp3"
-    ass_path = f"output/{c_key}.ass"
     b1_img = f"{MEDIA_DIR}/{c_key}_beat1.jpg"
     b2_img = f"{MEDIA_DIR}/{c_key}_beat2.jpg"
     b3_img = f"{MEDIA_DIR}/{c_key}_beat3.jpg"
     final_mp4 = f"{MEDIA_DIR}/{c_key}_latest.mp4"
 
-    human = c_data.get("human", {})
     locs = c_data.get("locations", {})
-    face_dna = human.get("immutable_face_dna", "26yo British woman Maya")
-    outfit = human.get("wardrobe_rotation", ["sage cardigan"])[0]
-    pet0 = chosen_pets[0]
-    pet1 = chosen_pets[1] if len(chosen_pets) > 1 else chosen_pets[0]
+    by_id = {p["id"]: p for p in chosen_pets}
+    beats = plan["beats"]
+    loc_keys = ["SET_RUG_POV", "SET_KITCHEN", "SET_LIVING"]
+    beat_imgs = [b1_img, b2_img, b3_img]
 
-    # 1. Synthesize Voice + ASCII .ass Captions
-    asyncio.run(generate_voice_and_captions(
-        script_data["script"], script_data["hook_text"], human, audio_path, ass_path
-    ))
-
-    duration = probe_duration(audio_path)
-
-    # 2. BEAT 1: Face-Locked Maya Candid Reaction Hook (Uses Master Face + PuLID)
-    master_face = ensure_maya_master_face(c_data)
-    prompt_b1 = (
-        f"{locs.get('SET_A_SOFA', '')}, candid vertical smartphone shot of {face_dna}, "
-        f"{human['expressions']['SMILE_LAUGH']}, wearing {outfit}, natural daylight"
-    )
-    generate_maya_scene_with_pulid(master_face, prompt_b1, c_data.get("master_seed", 884102), b1_img)
-
-    # 3. BEAT 2: First-Person POV of Pet #1 ONLY (Eliminates multi-pet fur/attribute bleed)
-    morph0 = age_data[pet0["id"]]["morphology"]
-    prompt_b2 = (
-        f"{locs.get('SET_C_RUG_POV', '')}, close-up first-person iPhone POV looking down at {pet0['immutable_marking_dna']} "
-        f"({morph0}), {script_data.get('pet1_action', 'exploring the jute rug')}, only one rabbit in frame, zero human hands"
-    )
-    fetch_flux_image(prompt_b2, pet0.get("pet_seed", 420882), b2_img)
-
-    # 4. BEAT 3: First-Person POV of Pet #2 ONLY
-    morph1 = age_data[pet1["id"]]["morphology"]
-    prompt_b3 = (
-        f"{locs.get('SET_B_KITCHEN', '')}, first-person iPhone POV looking at {pet1['immutable_marking_dna']} "
-        f"({morph1}), {script_data.get('pet2_action', 'sitting politely on oak floor')}, only one rabbit in frame, zero human hands"
-    )
-    fetch_flux_image(prompt_b3, pet1.get("pet_seed", 420881), b3_img)
+    # 1. One animal-only still per beat, each anchored to a locked pet so the
+    #    same rabbit comes back in the next episode looking like itself.
+    for i, beat in enumerate(beats):
+        pet = by_id[beat["pet_id"]]
+        morph = age_data[pet["id"]]["morphology"]
+        loc = locs.get(loc_keys[i % len(loc_keys)], "")
+        prompt = (
+            f"{loc}, candid vertical iPhone photo of {pet['immutable_marking_dna']} "
+            f"({morph}), {beat.get('action', 'sitting calmly on the floor')}, "
+            f"{pet.get('grounder', 'exactly one rabbit')}, "
+            f"photorealistic, natural daylight, animals only, nobody else in the room"
+        )
+        assert_animal_only(prompt, f"beat{i + 1} image")
+        seed = pet.get("pet_seed", 420000) + i * 7
+        fetch_flux_image(prompt, seed, beat_imgs[i])
+        print(f"  [cast] beat{i + 1}: {pet['name']} ({pet['breed']}) seed {seed}")
 
     # Final gate before anything reaches ffmpeg. Beat 3 of the run in issue #6
     # was a flat colour card here, and it became 4.6s of black screen in the
@@ -640,19 +451,17 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
             raise MediaGenerationError(f"{label} failed validation ({reason}); aborting reel")
         print(f"  [gate] {label} ok - {os.path.getsize(path) // 1024} KB")
 
-    # 5. Animate Each Beat into Video Segments (LTX-Video AI Motion -> 4K Smooth Drift Fallback)
-    d1 = round(max(2.2, duration * 0.28), 2)
-    d2 = round(max(2.6, duration * 0.38), 2)
-    d3 = round(max(2.6, duration - d1 - d2 + 0.6), 2)
-
-    seg1_mp4 = f"output/{c_key}_seg1.mp4"
-    seg2_mp4 = f"output/{c_key}_seg2.mp4"
-    seg3_mp4 = f"output/{c_key}_seg3.mp4"
-
-    anim_b1 = animate_beat_to_mp4(b1_img, "young woman smiling and reacting naturally on camera", d1, seg1_mp4, pan_dir=1)
-    anim_b2 = animate_beat_to_mp4(b2_img, f"{pet0['breed']} twitching nose and moving ears on rug", d2, seg2_mp4, pan_dir=-1)
-    anim_b3 = animate_beat_to_mp4(b3_img, f"{pet1['breed']} looking up curiously at camera", d3, seg3_mp4, pan_dir=1)
-    animators = {"beat1": anim_b1, "beat2": anim_b2, "beat3": anim_b3}
+    # 2. Animate each beat. The motion prompt describes the animal only.
+    d1 = d2 = d3 = 3.0
+    segs = [f"output/{c_key}_seg{n}.mp4" for n in (1, 2, 3)]
+    animators = {}
+    for i, beat in enumerate(beats):
+        pet = by_id[beat["pet_id"]]
+        motion_prompt = f"{pet['breed']} {beat.get('motion', 'moving naturally')}"
+        assert_animal_only(motion_prompt, f"beat{i + 1} motion")
+        animators[f"beat{i+1}"] = animate_beat_to_mp4(
+            beat_imgs[i], motion_prompt, [d1, d2, d3][i], segs[i], pan_dir=1 if i % 2 == 0 else -1
+        )
     live_beats = [b for b, p in animators.items() if p != "still-pan"]
     if not live_beats:
         raise MediaGenerationError(
@@ -661,20 +470,38 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         )
     print(f"  [motion] live beats: {', '.join(live_beats)}")
 
-    # 6. Stitch with Crossfades, Burn ASCII .ass Captions, and Normalize Speech Audio (NO Sine Drone!)
+    # 3. Soundtrack. One continuous track whose mood is set by the reel's most
+    #    energetic beat, faded in and out so it never starts or stops abruptly.
+    total_duration = round(d1 + d2 + d3 - 0.4, 2)
+    moods = [b.get("music_mood") for b in beats if b.get("music_mood")]
+    # One continuous track, so pick the mood that suits the reel as a whole
+    # rather than cutting between them. A reel built around zoomies and
+    # bouncing wants upbeat music; a reel of rabbits asleep in a box wants a
+    # lullaby. Ranking by energy, not first-wins, so the result is stable.
+    energy = {"calm": 0, "curious": 1, "playful": 2, "sleepy": -1}
+    lead_mood = max(moods, key=lambda m: energy.get(m, 1)) if moods else "curious"
+    music_wav = f"output/{c_key}_music.wav"
+    # Vary by day so consecutive episodes are not the same track note for note,
+    # while a rerun on the same day stays byte-identical.
+    seed = c_data.get("master_seed", 884102) + int(time.time()) // 86400
+    write_music_wav(lead_mood, total_duration, seed, music_wav)
+    print(f"  [music] mood '{lead_mood}' -> {music_wav} ({total_duration}s)")
+
+    # 4. Stitch with crossfades, burn the hook text, and lay the music under it.
+    hook = strip_non_ascii(plan.get("hook_text", ""))
+    ass_path = write_hook_overlay(hook, total_duration)
+
     xf1 = round(d1 - 0.20, 2)
     xf2 = round(d1 + d2 - 0.40, 2)
 
     cmd = [
         "ffmpeg", "-y",
-        "-i", seg1_mp4,
-        "-i", seg2_mp4,
-        "-i", seg3_mp4,
-        "-i", audio_path,
+        "-i", segs[0], "-i", segs[1], "-i", segs[2], "-i", music_wav,
         "-filter_complex",
         f"[0:v][1:v]xfade=transition=fade:duration=0.20:offset={xf1}[vx1];"
         f"[vx1][2:v]xfade=transition=fade:duration=0.20:offset={xf2},ass={ass_path}[vout];"
-        f"[3:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
+        f"[3:a]afade=t=in:st=0:d=0.6,afade=t=out:st={max(0.0, total_duration - 1.0):.2f}:d=1.0,"
+        f"loudnorm=I=-14:TP=-1.5:LRA=11[aout]",
         "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
         "-c:a", "aac", "-b:a", "128k",
@@ -684,7 +511,6 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
     ]
     subprocess.run(cmd, check=True)
 
-    # Measure what we actually shipped rather than trusting the pipeline.
     final_motion = measure_motion(final_mp4)
     print(f"  [motion] final reel motion score: {final_motion:.2f} (live >= {MOTION_THRESHOLD})")
 
@@ -696,7 +522,43 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         "animators": animators,
         "live_beats": live_beats,
         "motion_score": final_motion,
+        "hook_text": hook,
+        "music_mood": lead_mood,
+        "cast": [
+            {"id": b["pet_id"], "name": by_id[b["pet_id"]]["name"],
+             "breed": by_id[b["pet_id"]]["breed"], "action": b.get("action", "")}
+            for b in beats
+        ],
     }
+
+
+def write_hook_overlay(hook: str, duration_sec: float) -> str:
+    """A single short on-screen caption for the whole reel.
+
+    Speech captions are gone - there is no speech. What remains is the one line
+    of text these accounts put over the footage, which is how the viewer knows
+    what they are looking at before the scroll takes them away.
+    """
+    path = "output/hook.ass"
+    header = (
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 720\nPlayResY: 1280\n"
+        "WrapStyle: 2\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, "
+        "SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, "
+        "StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,"
+        "0,0,0,0,100,100,0,0,1,4,2,2,60,60,230,1\n\n"
+    )
+    body = (
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text\n"
+        f"Dialogue: 0,{format_ass_time(0.4)},{format_ass_time(max(0.6, duration_sec - 0.4))},"
+        f"Default,,0,0,0,,{hook}\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(header + body)
+    return path
 
 # =====================================================================
 # 4. STOREFRONT, GROUNDING DASHBOARD, & MAIN RUNNER
@@ -713,15 +575,21 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
         f.write("")
 
     cache_bust = int(time.time())
-    hook_title = latest_draft["hook_text"] if latest_draft else "Maya & The Buns — Latest Reel"
-    script_txt = latest_draft["script"] if latest_draft else "Latest generated draft."
+    hook_title = latest_draft["hook_text"] if latest_draft else "The Buns - Latest Reel"
+    mood = latest_draft.get("music_mood", "") if latest_draft else ""
+    cast_txt = " · ".join(
+        f"{c['name']} ({c['breed'].replace(' Rabbit','')})" for c in (latest_draft.get("cast") or [])
+    ) if latest_draft else ""
     watch_html = f"""<!DOCTYPE html>
     <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>Watch Daily Draft</title></head>
     <body style='background:#0f172a;color:#f8fafc;font-family:sans-serif;padding:20px;max-width:480px;margin:auto;text-align:center;'>
-      <h2 style='color:#f59e0b;margin-bottom:8px;'>🎬 {hook_title}</h2>
+      <h2 style='color:#f59e0b;margin-bottom:8px;'>🐾 {hook_title}</h2>
       <video controls autoplay playsinline style='width:100%;max-width:360px;border-radius:16px;border:2px solid #334155;background:#000;' src='../media/rabbit_channel_latest.mp4?v={cache_bust}'></video>
-      <p style='background:#1e293b;padding:14px;border-radius:10px;font-size:14px;line-height:1.5;margin-top:16px;'>"{script_txt}"</p>
+      <p style='background:#1e293b;padding:14px;border-radius:10px;font-size:14px;line-height:1.5;margin-top:16px;'>
+        <strong>Animals only.</strong> No owner on camera, no voiceover.<br>
+        <span style='color:#34d399;font-size:12px;'>🎵 {mood} · {cast_txt}</span>
+      </p>
       <p style='margin-top:16px;'><a href='../media/rabbit_channel_latest.mp4?v={cache_bust}' download style='color:#38bdf8;font-weight:700;'>📥 Download Raw MP4</a> | <a href='../grounding/' style='color:#f59e0b;'>🛡️ Grounding Bible</a></p>
     </body></html>"""
     with open(os.path.join(DOCS_DIR, "watch", "index.html"), "w", encoding="utf-8") as f:
@@ -729,7 +597,6 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
 
     grounding_cards, hub_links = [], []
     for c_key, c_data in bible.items():
-        h = c_data.get("human", {})
         slug = c_data.get("bio_slug", c_key.split("_")[0])
         c_name = c_data.get("channel_name", c_key)
         c_handle = c_data.get("handle", f"@{slug}")
@@ -738,7 +605,8 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
 
         pets_html = "".join([
             f"<div style='background:#0f172a;padding:12px;border-radius:8px;margin-bottom:8px;border:1px solid #334155;'>"
-            f"<strong>{p.get('name','Pet')}</strong> ({p.get('breed','Rabbit')}) — Born: {p.get('birth_date','2026-06-01')}<br>"
+            f"<strong>{p.get('name','Pet')}</strong> ({p.get('breed','Rabbit')}) — Born: {p.get('birth_date','2026-06-01')}"
+            f" · <span style='color:#94a3b8;font-size:11px;'>seed {p.get('pet_seed','-')}</span><br>"
             f"<small>{p.get('immutable_marking_dna', '')}</small></div>"
             for p in c_data.get("pets", [])
         ])
@@ -746,15 +614,14 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
         grounding_cards.append(
             f"<div style='background:#1e293b;padding:20px;border-radius:12px;margin-bottom:20px;'>"
             f"<h2>{c_name} ({c_handle})</h2>"
-            f"<p style='color:#34d399;font-size:13px;'>🔒 Master Face Lock (`maya_master.jpg`) + Solo-Pet POV Cutaways Active</p>"
+            f"<p style='color:#34d399;font-size:13px;'>🐾 ANIMALS-ONLY CAST — no human, no owner, no voiceover. "
+            f"Music: {c_data.get('music_policy','')}</p>"
             f"<div style='display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;'>"
-            f"<div><small>Master Face Lock</small><br><img src='../media/maya_master.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:2px solid #f59e0b;'></div>"
-            f"<div><small>Beat 1 (Maya Hook)</small><br><img src='../media/{c_key}_beat1.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
-            f"<div><small>Beat 2 (Pet 1 POV)</small><br><img src='../media/{c_key}_beat2.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
-            f"<div><small>Beat 3 (Pet 2 POV)</small><br><img src='../media/{c_key}_beat3.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
+            f"<div><small>Beat 1</small><br><img src='../media/{c_key}_beat1.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
+            f"<div><small>Beat 2</small><br><img src='../media/{c_key}_beat2.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
+            f"<div><small>Beat 3</small><br><img src='../media/{c_key}_beat3.jpg?v={cache_bust}' style='width:135px;border-radius:10px;border:1px solid #475569;'></div>"
             f"</div>"
-            f"<p><strong>Human Creator:</strong> {h.get('name','Maya')} ({h.get('age',26)}yo)<br><small>{h.get('immutable_face_dna', '')}</small></p>"
-            f"<h3>Active Pets</h3>{pets_html}<h3>Locked Apartment Locations</h3><ul>{locs_html}</ul></div>"
+            f"<h3>Grounded Animals</h3>{pets_html}<h3>Locked Locations</h3><ul>{locs_html}</ul></div>"
         )
 
         prod_html = "".join([
@@ -789,7 +656,7 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
             f"<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
             f"<title>AI Pet Influencer Hub</title></head>"
             f"<body style='background:#0f172a;color:#f8fafc;font-family:sans-serif;padding:32px;max-width:600px;margin:auto;line-height:1.6;'>"
-            f"<h1>🐾 AI Pet Influencer Collective</h1>"
+            f"<h1>🐾 Pet Influencer Collective</h1>"
             f"<p><a href='watch/' style='color:#34d399;font-weight:700;font-size:18px;'>▶️ Watch Latest Generated Reel →</a></p>"
             f"<h3>Public Storefronts</h3><ul>{''.join(hub_links)}</ul>"
             f"<hr style='border-color:#334155;margin:24px 0;'><h3>Owner Operations</h3>"
@@ -821,7 +688,7 @@ def announce_billing_policy():
         print("[billing]      motionless reel and a 'DEGRADED' notice; this is the")
         print("[billing]      cost of running at $0, not a bug.")
     free_tts = [r["model"] for r in om.TTS_LADDER if billing.is_free(r["model"])]
-    print(f"[billing]   TTS (already free)  : {', '.join(free_tts) or 'none'}")
+    print(f"[billing]   TTS (already free)  : {', '.join(free_tts) or 'none'} (unused - reels are silent)")
 
 
 def main():
@@ -845,9 +712,9 @@ def main():
         age_summary = "\n".join([f"- {p['name']}: {age_data[p['id']]['age_weeks']} wks ({age_data[p['id']]['stage']})" for p in pets])
         trends = fetch_safe_trends()
 
-        script_data = write_daily_script(c_data, pets[:2], age_summary, trends[0])
+        script_data = write_daily_episode_plan(c_data, pets, age_summary, trends[0])
         try:
-            render_result = render_video(c_key, c_data, pets[:2], age_data, script_data)
+            render_result = render_video(c_key, c_data, pets, age_data, script_data)
         except MediaGenerationError as e:
             # Do not queue a draft, do not open an issue, and above all do not
             # leave a half-rendered MP4 sitting in docs/media where the watch
@@ -862,12 +729,13 @@ def main():
         raw_b2_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_beat2.jpg"
         raw_b3_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_beat3.jpg"
 
-        c_name = c_data.get("channel_name", "Maya & The Buns")
+        c_name = c_data.get("channel_name", "The Buns")
         latest_draft = {
             "channel_key": c_key,
             "channel_name": c_name,
-            "hook_text": strip_non_ascii(script_data["hook_text"]),
-            "script": script_data["script"],
+            "hook_text": render_result.get("hook_text", ""),
+            "music_mood": render_result.get("music_mood", ""),
+            "cast": render_result.get("cast", []),
             "video_url": raw_mp4_url,
             "watch_url": pages_watch_url,
             "live_beats": render_result.get("live_beats", []),
@@ -891,16 +759,22 @@ def main():
                    f"(NOT live motion)\n" if dead else "")
                 + "\n"
             )
+            cast_rows = "\n".join(
+                f"| {n} | {c['breed']} | {c['action']} |"
+                for n, c in enumerate(latest_draft.get("cast", []), 1)
+            )
             issue_body = (
-                f"### 🎬 POV + Reaction Cutaway Draft Ready: {c_name}\n\n"
+                f"### 🎬 Silent Pet Draft Ready: {c_name}\n\n"
                 f"- **▶️ Watch in Browser Player:** [{pages_watch_url}]({pages_watch_url})\n"
                 f"- **📥 Direct Raw MP4 Stream:** [Click to open/download MP4]({raw_mp4_url})\n\n"
-                f"**Top Hook Banner:** `{latest_draft['hook_text']}`\n"
+                f"**Animals only - no owner on camera, no voiceover.**\n"
+                f"**On-screen text:** `{latest_draft['hook_text']}`\n"
+                f"**Music:** `{latest_draft.get('music_mood','')}` (generated instrumental, no speech)\n"
                 f"{motion_line}"
-                f"**Spoken Script:**\n> {latest_draft['script']}\n\n"
-                f"### 📸 Face-Locked Maya + Solo-Pet POV Cutaways\n"
-                f"| Beat 1 (Face-Locked Maya) | Beat 2 ({pets[0]['name']} Solo POV) | Beat 3 ({pets[1]['name']} Solo POV) |\n"
-                f"| :--- | :--- | :--- |\n"
+                f"### 🐾 Grounded cast\n"
+                f"| Beat | Animal | Doing |\n| :--- | :--- | :--- |\n{cast_rows}\n\n"
+                f"### 📸 Beat stills\n"
+                f"| Beat 1 | Beat 2 | Beat 3 |\n| :--- | :--- | :--- |\n"
                 f"| ![Beat 1]({raw_b1_url}) | ![Beat 2]({raw_b2_url}) | ![Beat 3]({raw_b3_url}) |\n\n"
                 f"---\n"
                 f"**Mobile Actions:** Apply label `approve` or comment `/publish`."
@@ -916,7 +790,7 @@ def main():
     build_all_storefronts_and_grounding(latest_draft)
     with open(STATE_QUEUE, "w", encoding="utf-8") as f:
         json.dump(queue, f, indent=2)
-    print("✅ Complete! All 6 video, audio, face-lock, and motion fixes applied.")
+    print("✅ Complete! Silent animals-only reel rendered.")
 
 if __name__ == "__main__":
     main()

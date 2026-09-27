@@ -1,56 +1,51 @@
 {
   "rabbit_channel": {
     "enabled": true,
-    "channel_name": "Maya & The Buns",
-    "handle": "@MayaAndTheBuns",
+    "channel_name": "The Buns",
+    "handle": "@TheBunsDaily",
     "bio_slug": "barnaby",
     "master_seed": 884102,
-    "human": {
-      "name": "Maya",
-      "age": 26,
-      "edge_voice": "en-GB-SoniaNeural",
-      "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with subtle freckles, hazel-green eyes behind thin round gold glasses, wavy chestnut hair in a claw clip",
-      "expressions": {
-        "SMILE_WARM": "gentle closed-lip warm smile",
-        "SMILE_LAUGH": "natural laughing smile",
-        "EXPRESSION_DEADPAN": "deadpan dry flat-line mouth, raised left eyebrow"
-      },
-      "wardrobe_rotation": [
-        "oversized sage-green chunky waffle-knit cardigan over a white crewneck tee"
-      ]
-    },
+    "cast_policy": "ANIMALS_ONLY",
+    "cast_policy_note": "No human, no face, no hands, no owner appears in any image or video. Maya is the (unseen) owner and is never rendered. Every beat is rabbits only.",
+    "music_policy": "Light-hearted instrumental background music generated per episode. No voiceover, no narration, no on-screen speech captions.",
     "locations": {
-      "SET_A_SOFA": "bright Scandi living room, sitting by an oatmeal boucle sofa, sage-green wall, herringbone oak floor",
-      "SET_B_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets, bright morning daylight",
-      "SET_C_RUG_POV": "high-angle first-person POV looking down at a braided cream jute rug over oak flooring"
+      "SET_RUG_POV": "high-angle first-person iPhone POV looking down at a braided cream jute rug over herringbone oak flooring, black wire playpen panel in background, warm window daylight",
+      "SET_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets and white subway tile splashback, soft morning daylight, no people",
+      "SET_LIVING": "bright Scandi cottage living room, oatmeal boucle sofa, matte sage-green panelled wall behind, potted monstera plant, warm window daylight, no people"
     },
     "pets": [
       {
         "id": "barnaby",
         "name": "Barnaby",
         "breed": "Holland Lop Rabbit",
+        "species": "rabbit",
         "birth_date": "2026-05-10",
         "pet_seed": 420881,
         "role": "The polite food critic",
-        "immutable_marking_dna": "cream-white Holland Lop rabbit with floppy ears where ONLY the left ear is charcoal-grey"
+        "immutable_marking_dna": "one single cream-white Holland Lop rabbit with long floppy lop ears, where ONLY the left ear is dark charcoal-grey and the right ear is cream white, pink nose, dark round eyes, dense soft plush fur",
+        "grounder": "exactly one rabbit, full body and face clearly visible, short upright fluffy coat, same charcoal-grey left ear in every shot"
       },
       {
         "id": "pip",
         "name": "Pip",
         "breed": "Lionhead Rabbit",
+        "species": "rabbit",
         "birth_date": "2026-07-15",
         "pet_seed": 420882,
         "role": "The cable-chewing chaos gremlin",
-        "immutable_marking_dna": "jet-black Lionhead rabbit with upright ears and a white fluffy mane tuft between his ears"
+        "immutable_marking_dna": "one single jet-black Lionhead rabbit with short upright black ears, a distinct snow-white fluffy mane tuft right between his ears, and a black nose, dark round eyes",
+        "grounder": "exactly one rabbit, full body and face clearly visible, the white mane tuft between the ears visible in every shot"
       },
       {
         "id": "clover",
         "name": "Clover",
         "breed": "Dutch Rabbit",
+        "species": "rabbit",
         "birth_date": "2026-07-15",
         "pet_seed": 420883,
         "role": "The zoomie queen",
-        "immutable_marking_dna": "cinnamon-amber and white Dutch rabbit with a white nose blaze"
+        "immutable_marking_dna": "one single cinnamon-amber and white Dutch rabbit with a crisp white shoulder saddle, a white nose blaze running up the face, white front paws, and dark round eyes",
+        "grounder": "exactly one rabbit, full body and face clearly visible, the white shoulder saddle and nose blaze visible in every shot"
       }
     ]
   }

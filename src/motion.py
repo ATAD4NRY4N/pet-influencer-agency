@@ -30,18 +30,33 @@ FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 # A clip is only "alive" if the median frame-to-frame luma difference clears
 # this.
 #
-# Calibrated against measured artifacts, not guessed:
-#   flat colour card / frozen frame ........ 0.0
-#   small background element moving ......... 0.5
-#   _camera_drift fallback (dead character) . 3.6   <- must stay BELOW this
-#   real image-to-video output .............. 7.1   <- must stay ABOVE this
+# Calibrated against the *published* issue #8 reel and a control built from the
+# exact same base stills with the exact same _camera_drift filter chain, scored
+# through this same function:
 #
-# The old value of 4.0 was set from an estimated panned-still score of ~1.8,
-# but the actual _camera_drift pan measures 3.6 against a real photograph. At
-# 4.0 the fallback sat 0.4 from being accepted as "live motion", which is
-# precisely the failure this gate exists to prevent. 5.0 puts the fallback 1.4
-# below the line and genuine animation 2.1 above it.
-MOTION_THRESHOLD = 5.0
+#   flat colour card / frozen frame ............  0.0
+#   _camera_drift on rabbit_channel_beat2 .....  2.49  <- must stay BELOW this
+#   _camera_drift on rabbit_channel_beat3 .....  4.20  <- must stay BELOW this
+#   _camera_drift on rabbit_channel_beat1 .....  4.78  <- must stay BELOW this
+#   real image-to-video (that reel's beats) ...  7.44 / 12.49 / 14.52
+#
+# The previous calibration claimed the dead pan measured 3.6 and set the line at
+# 5.0. Rebuilt against the real published stills the dead pan peaks at 4.78, so
+# 5.0 left only 0.22 of margin - the fallback was one noisy beat away from being
+# published as "genuinely animated". 6.0 puts the worst dead pan 1.22 below the
+# line and still clears the weakest real clip by 1.4.
+MOTION_THRESHOLD = 6.0
+
+# The Space's own default canvas is 704x512 landscape. Every beat still this
+# agency produces is 9:16 portrait, so handing the Space a landscape canvas
+# makes it re-frame the subject: fitting 580x1015 into 512x704 either crops 21%
+# off the top and bottom or pillarboxes 21% black bars. Either way the model is
+# animating a subject that is no longer the one we composed, and a distilled
+# model re-composing a cropped subject over 9 frames is how issue #8 shipped a
+# human/rabbit hybrid with a third ear. 512x896 is 9:16 to within 0.00% of the
+# real still aspect, so nothing is cropped and nothing is padded.
+LTX_WIDTH_UI = 512
+LTX_HEIGHT_UI = 896
 MIN_CLIP_SECONDS = 1.5
 
 
@@ -207,13 +222,22 @@ def _via_ltx(img_path: str, prompt: str, out_path: str, duration: float, hf_toke
     client = _make_client("Lightricks/ltx-video-distilled", hf_token)
     job = client.submit(
         prompt=prompt,
-        negative_prompt="static image, no motion, frozen, still photo, warping, morphing face",
+        # Issue #8 came back with the human and the rabbit fused into one
+        # creature and the rabbit wearing a third ear. Those are exactly the
+        # failures a distilled model falls into when it re-composes a cropped
+        # subject, so name them explicitly rather than only saying "no morphing".
+        negative_prompt=(
+            "static image, no motion, frozen, still photo, warping, morphing face, "
+            "hybrid creature, human face on animal, animal face on human, "
+            "fused bodies, merged subjects, two heads, extra ears, extra limbs, "
+            "deformed, mutant, cropped head, letterboxed, black bars"
+        ),
         input_image_filepath=handle_file(img_path),
         input_video_filepath=None,
         # Portrait: the Space's own defaults are 704x512 (landscape), which
         # would letterbox a 9:16 beat into black bars.
-        width_ui=512,
-        height_ui=704,
+        width_ui=LTX_WIDTH_UI,
+        height_ui=LTX_HEIGHT_UI,
         mode="image-to-video",
         duration_ui=duration,
         ui_frames_to_use=9,
@@ -223,7 +247,10 @@ def _via_ltx(img_path: str, prompt: str, out_path: str, duration: float, hf_toke
         # reason this free rung never produced a clip, and with the paid rungs
         # switched off it is the main remaining route to free animation.
         seed_ui=random.randint(0, 2_147_483_647),
-        randomize_seed=True,
+        # randomize_seed=True makes the Space ignore seed_ui entirely, so every
+        # rerun produced a different character and no bad frame could ever be
+        # reproduced or A/B'd against a fix.
+        randomize_seed=False,
         ui_guidance_scale=1.0,
         improve_texture_flag=True,
         api_name="/image_to_video",
