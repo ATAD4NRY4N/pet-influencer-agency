@@ -64,6 +64,21 @@
       "video_url": "https://raw.githubusercontent.com/ATAD4NRY4N/pet-influencer-agency/main/docs/media/rabbit_channel_latest.mp4",
       "watch_url": "https://atad4nry4n.github.io/pet-influencer-agency/watch/",
       "created_at": "2026-09-27T12:01:58.188307+00:00"
+    },
+    {
+      "channel_key": "rabbit_channel",
+      "channel_name": "Maya & The Buns",
+      "hook_text": "Bunnies bite budget blues",
+      "script": "In my flat, Barnaby\u2019s chewing the rug like a mad thing, while Pip sits proper and sorted, munching hay. Honestly, it\u2019s really pretty wild. [laughing] How do your bunnies stay calm when money\u2019s tight?",
+      "video_url": "https://raw.githubusercontent.com/ATAD4NRY4N/pet-influencer-agency/main/docs/media/rabbit_channel_latest.mp4",
+      "watch_url": "https://atad4nry4n.github.io/pet-influencer-agency/watch/",
+      "live_beats": [
+        "beat1",
+        "beat2",
+        "beat3"
+      ],
+      "motion_score": 10.463681821469908,
+      "created_at": "2026-09-27T17:10:56.618924+00:00"
     }
   ]
 }
