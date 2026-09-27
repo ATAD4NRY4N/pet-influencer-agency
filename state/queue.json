@@ -1,5 +1,15 @@
 {
   "pending_drafts": {},
   "published_history": [],
-  "used_trends": []
+  "used_trends": [],
+  "pending_approvals": [
+    {
+      "channel_key": "rabbit_channel",
+      "channel_name": "Maya & The Buns",
+      "hook_text": "Three Rabbits vs One Flat",
+      "script": "Day 42 with three house rabbits, and Pip just proved playpen fences are purely decorative. Barnaby didn't even blink. Which of your pets is the chaos gremlin?",
+      "video_url": "Uploaded in workflow run",
+      "created_at": "2026-09-27T07:18:31.940004+00:00"
+    }
+  ]
 }

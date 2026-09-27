@@ -1,242 +1,57 @@
 {
   "rabbit_channel": {
     "enabled": true,
-    "channel_title": "Maya & The Buns",
-    "slug": "barnaby",
+    "channel_name": "Maya & The Buns",
+    "handle": "@MayaAndTheBuns",
+    "bio_slug": "barnaby",
     "master_seed": 884102,
-    "rss_queries": [
-      "https://news.google.com/rss/search?q=house+rabbit+care+OR+indoor+bunny+behavior&hl=en-GB&gl=GB&ceid=GB:en",
-      "https://www.reddit.com/r/Rabbits/hot/.rss"
-    ],
     "human": {
       "name": "Maya",
       "age": 26,
-      "fish_voice_id": "7f92f8afb8ec43bf81429cc1c9199cb1",
       "edge_voice": "en-GB-SoniaNeural",
-      "pitch": "+2Hz",
-      "face_sheet": "assets/sheets/rabbit_channel/maya_master.jpg",
-      "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with light nose-bridge freckles, hazel-green eyes behind thin round matte-gold wireframe glasses, shoulder-length chestnut-brown wavy hair with a center part pulled half-up in a tortoiseshell claw clip",
+      "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with subtle freckles, hazel-green eyes behind thin round gold glasses, wavy chestnut hair in a claw clip",
       "expressions": {
-        "SMILE_WARM": "soft closed-lip warm smile with a single subtle left-cheek dimple, relaxed eyebrows",
-        "SMILE_LAUGH": "natural open-mouth laugh showing straight upper teeth, crinkled joyful eyes",
-        "DEADPAN": "deadpan unimpressed flat-line mouth, raised left eyebrow looking directly into the smartphone camera lens",
-        "SHOCKED": "wide eyes behind round gold glasses, hand near mouth in playful disbelief"
+        "SMILE_WARM": "gentle closed-lip warm smile",
+        "SMILE_LAUGH": "natural laughing smile",
+        "EXPRESSION_DEADPAN": "deadpan dry flat-line mouth, raised left eyebrow"
       },
       "wardrobe_rotation": [
-        "oversized sage-green chunky waffle-knit cardigan over a plain white crew-neck tee",
-        "oatmeal ribbed crewneck jumper with rolled sleeves and a thin gold chain necklace",
-        "terracotta linen button-down shirt worn open over a grey ribbed tank top"
-      ],
-      "last_outfit_index": 0
+        "oversized sage-green chunky waffle-knit cardigan over a white crewneck tee"
+      ]
     },
     "locations": {
-      "SET_A_SOFA": "inside a bright Scandi-cottage living room, sitting in front of an oatmeal boucle sofa against a matte sage-green panelled wall, a potted monstera plant in a woven basket on the far left, warm morning window light from the right, herringbone oak wood floor with a braided cream jute rug",
-      "SET_B_KITCHEN": "standing at a solid oak butcher-block kitchen island, matte cream shaker cabinets and white subway tile splashback behind her, a vintage copper kettle on the left counter, natural daylight from the right window",
-      "SET_C_RUG_POV": "high-angle first-person POV smartphone shot looking straight down at a braided cream jute rug over herringbone oak wood flooring, black wire puppy-playpen panels visible along the top-left edge and a wooden hay rack against the white skirting board"
+      "SET_A_SOFA": "bright Scandi living room, sitting by an oatmeal boucle sofa, sage-green wall, herringbone oak floor",
+      "SET_B_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets, bright morning daylight",
+      "SET_C_RUG_POV": "high-angle first-person POV looking down at a braided cream jute rug over oak flooring"
     },
     "pets": [
       {
         "id": "barnaby",
         "name": "Barnaby",
-        "species": "Rabbit",
-        "breed": "Holland Lop",
-        "birth_date": "2026-06-15",
+        "breed": "Holland Lop Rabbit",
+        "birth_date": "2026-05-10",
         "pet_seed": 420881,
-        "role": "The polite, food-obsessed landlord",
-        "immutable_marking_dna": "Holland Lop rabbit with dense cream-white fur, asymmetrical floppy lop ears where ONLY the left ear is dark charcoal-grey and the right ear is cream-white, pink nose, dark brown eyes",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 0
+        "role": "The polite food critic",
+        "immutable_marking_dna": "cream-white Holland Lop rabbit with floppy ears where ONLY the left ear is charcoal-grey"
       },
       {
         "id": "pip",
         "name": "Pip",
-        "species": "Rabbit",
-        "breed": "Lionhead",
-        "birth_date": "2026-07-25",
+        "breed": "Lionhead Rabbit",
+        "birth_date": "2026-07-15",
         "pet_seed": 420882,
         "role": "The cable-chewing chaos gremlin",
-        "immutable_marking_dna": "Lionhead rabbit with jet-black body fur, short upright black ears, and a distinct snow-white fluffy mane tuft right between his ears like a crown, dark expressive eyes",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 1
+        "immutable_marking_dna": "jet-black Lionhead rabbit with upright ears and a white fluffy mane tuft between his ears"
       },
       {
         "id": "clover",
         "name": "Clover",
-        "species": "Rabbit",
         "breed": "Dutch Rabbit",
-        "birth_date": "2026-07-25",
+        "birth_date": "2026-07-15",
         "pet_seed": 420883,
-        "role": "The hyperactive binky & zoomie queen",
-        "immutable_marking_dna": "Dutch rabbit with cinnamon-amber rear fur, a crisp white saddle band across the shoulders and front legs, and a symmetrical narrow white diamond blaze running straight up the center of the nose",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 2
+        "role": "The zoomie queen",
+        "immutable_marking_dna": "cinnamon-amber and white Dutch rabbit with a white nose blaze"
       }
-    ],
-    "renovation_log": [
-      {"date": "2026-09-26", "event": "Channel initialized: Maya in her 1-bed Scandi cottage flat with Barnaby, Pip, and Clover."}
-    ]
-  },
-  "cat_channel": {
-    "enabled": false,
-    "channel_title": "Chloe & The Flatmates",
-    "slug": "cleo",
-    "master_seed": 910442,
-    "rss_queries": [
-      "https://news.google.com/rss/search?q=indoor+cat+behavior+OR+kitten+care+tips&hl=en-GB&gl=GB&ceid=GB:en",
-      "https://www.reddit.com/r/cats/hot/.rss"
-    ],
-    "human": {
-      "name": "Chloe",
-      "age": 29,
-      "fish_voice_id": "",
-      "edge_voice": "en-GB-LibbyNeural",
-      "pitch": "+0Hz",
-      "face_sheet": "assets/sheets/cat_channel/chloe_master.jpg",
-      "immutable_face_dna": "29-year-old woman Chloe, sleek dark bob haircut with curtain bangs, olive skin, dark brown eyes, silver hoop earrings",
-      "expressions": {
-        "SMILE_WARM": "subtle knowing smirk, relaxed eyes",
-        "SMILE_LAUGH": "bright laugh with crinkled nose",
-        "DEADPAN": "deadpan exhausted cat-owner stare into lens",
-        "SHOCKED": "eyebrows raised in disbelief at cat antics"
-      },
-      "wardrobe_rotation": [
-        "charcoal grey cashmere lounge hoodie",
-        "crisp white oversized cotton poplin shirt",
-        "black ribbed turtleneck sweater"
-      ],
-      "last_outfit_index": 0
-    },
-    "locations": {
-      "SET_A_SOFA": "inside a minimalist modern apartment, charcoal linen sofa, floor-to-ceiling cat tree by a sunlit window, concrete accent wall",
-      "SET_B_KITCHEN": "sleek matte black kitchen counter with marble waterfall edge and stainless steel appliances",
-      "SET_C_RUG_POV": "high-angle first-person POV looking down at a plush geometric Moroccan rug on light ash wood flooring"
-    },
-    "pets": [
-      {
-        "id": "cleo",
-        "name": "Cleo",
-        "species": "Cat",
-        "breed": "British Shorthair",
-        "birth_date": "2026-05-10",
-        "pet_seed": 510111,
-        "role": "The plush blue-grey luxury critic",
-        "immutable_marking_dna": "blue-grey British Shorthair cat with round copper-amber eyes and a tiny white locket spot on the chest",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 0
-      },
-      {
-        "id": "biscuit",
-        "name": "Biscuit",
-        "species": "Cat",
-        "breed": "Maine Coon Mix",
-        "birth_date": "2026-07-15",
-        "pet_seed": 510112,
-        "role": "The clumsy water-obsessed ginger",
-        "immutable_marking_dna": "fluffy ginger tabby Maine Coon mix with tufted ears and four symmetrical snow-white paws",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 1
-      },
-      {
-        "id": "mochi",
-        "name": "Mochi",
-        "species": "Cat",
-        "breed": "Scottish Fold",
-        "birth_date": "2026-07-15",
-        "pet_seed": 510113,
-        "role": "The dramatic picky eater",
-        "immutable_marking_dna": "calico Scottish Fold cat with folded ears, white face with a single orange patch over the right eye",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 2
-      }
-    ],
-    "renovation_log": [
-      {"date": "2026-09-26", "event": "Channel initialized: Chloe with Cleo, Biscuit, and Mochi."}
-    ]
-  },
-  "dog_channel": {
-    "enabled": false,
-    "channel_title": "Liam & The Pack",
-    "slug": "buster",
-    "master_seed": 773190,
-    "rss_queries": [
-      "https://news.google.com/rss/search?q=puppy+training+tips+OR+dog+enrichment&hl=en-GB&gl=GB&ceid=GB:en",
-      "https://www.reddit.com/r/dogs/hot/.rss"
-    ],
-    "human": {
-      "name": "Liam",
-      "age": 31,
-      "fish_voice_id": "",
-      "edge_voice": "en-GB-RyanNeural",
-      "pitch": "+0Hz",
-      "face_sheet": "assets/sheets/dog_channel/liam_master.jpg",
-      "immutable_face_dna": "31-year-old British man Liam, short textured light-brown hair, neatly trimmed beard stubble, friendly blue eyes",
-      "expressions": {
-        "SMILE_WARM": "friendly warm grin with crow's feet",
-        "SMILE_LAUGH": "hearty laugh looking at camera",
-        "DEADPAN": "stoic mud-covered dog owner sighing at lens",
-        "SHOCKED": "jaw dropped looking at chewed item"
-      },
-      "wardrobe_rotation": [
-        "navy and forest-green plaid flannel shirt over a white tee",
-        "olive green chore jacket over a grey waffle shirt",
-        "burgundy crewneck sweatshirt"
-      ],
-      "last_outfit_index": 0
-    },
-    "locations": {
-      "SET_A_SOFA": "cosy British semi-detached living room with a tan distressed leather sofa, brick fireplace, and dog beds on tartan rug",
-      "SET_B_KITCHEN": "rustic country kitchen with slate floor tiles, stable door leading out to a grassy back garden",
-      "SET_C_RUG_POV": "high-angle first-person POV looking down at a washable tartan rug and slate kitchen entryway with dog leads hanging on wall"
-    },
-    "pets": [
-      {
-        "id": "buster",
-        "name": "Buster",
-        "species": "Dog",
-        "breed": "Golden Retriever",
-        "birth_date": "2026-05-01",
-        "pet_seed": 610221,
-        "role": "The gentle toy-carrying giant",
-        "immutable_marking_dna": "light golden retriever with a dark red bandana around neck and a lighter cream patch on chest",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 0
-      },
-      {
-        "id": "pepper",
-        "name": "Pepper",
-        "species": "Dog",
-        "breed": "Australian Shepherd",
-        "birth_date": "2026-07-10",
-        "pet_seed": 610222,
-        "role": "The puzzle-solving escape artist",
-        "immutable_marking_dna": "blue merle Australian Shepherd with heterochromia where LEFT eye is ice-blue and RIGHT eye is amber-brown, copper tan eyebrows",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 1
-      },
-      {
-        "id": "nugget",
-        "name": "Nugget",
-        "species": "Dog",
-        "breed": "French Bulldog",
-        "birth_date": "2026-07-10",
-        "pet_seed": 610223,
-        "role": "The stubborn bed-stealing potato",
-        "immutable_marking_dna": "dark brindle French Bulldog with upright bat ears and a white star mark on chest",
-        "temp_modifier": "",
-        "temp_modifier_until": "",
-        "days_since_featured": 2
-      }
-    ],
-    "renovation_log": [
-      {"date": "2026-09-26", "event": "Channel initialized: Liam with Buster, Pepper, and Nugget."}
     ]
   }
 }
