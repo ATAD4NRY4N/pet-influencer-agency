@@ -17,6 +17,14 @@ try:
 except Exception:
     HAS_OPENAI = False
 
+from src.openrouter_media import (
+    MediaGenerationError,
+    VOICE_REFERENCE_TRANSCRIPT,
+    generate_beat_image,
+    synthesize_speech,
+    validate_image,
+)
+
 try:
     from gradio_client import Client, handle_file
     HAS_GRADIO = True
@@ -172,6 +180,14 @@ def fetch_safe_trends() -> list[str]:
         "How to bunny-proof laptop and phone cords in 5 minutes"
     ]
 
+FREE_LLM_WATERFALL = [
+    "openrouter/free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+]
+
 def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary: str, trend: str) -> dict:
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     human_name = channel_meta.get("human", {}).get("name", "Maya")
@@ -187,22 +203,34 @@ def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary:
             "1. Conversational UK English ('flat', 'proper', 'sorted'). NO emojis in hook_text.\n"
             "2. Contrast how the two rabbits behave.\n"
             "3. End with a relatable question for pet owners in the comments.\n"
+            "4. Include exactly one inline emotion tag such as [sigh], [laughing] or [excited]. "
+            "The voice model performs these literally, and they are stripped from the "
+            "on-screen captions, so place them where a real person would react.\n"
             "Return ONLY valid JSON:\n"
             '{"script": "spoken words...", "hook_text": "4 WORD ASCII HOOK", '
             '"pet1_action": "chewing a cardboard box corner on the jute rug", '
             '"pet2_action": "sitting politely next to a ceramic water bowl on the rug"}'
         )
-        for m in ["openrouter/free", "meta-llama/llama-3.3-70b-instruct:free", "google/gemma-3-27b-it:free"]:
-            try:
-                r = client.chat.completions.create(model=m, messages=[{"role": "user", "content": prompt}], timeout=25)
-                raw = r.choices[0].message.content or ""
-                match = re.search(r"\{.*\}", raw, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    if "script" in data and "hook_text" in data:
-                        return data
-            except Exception as e:
-                print(f"⚠️ Model {m} skipped: {e}")
+        for m in FREE_LLM_WATERFALL:
+            for attempt in range(2):
+                try:
+                    r = client.chat.completions.create(model=m, messages=[{"role": "user", "content": prompt}], timeout=30)
+                    raw = r.choices[0].message.content or ""
+                    match = re.search(r"\{.*\}", raw, re.DOTALL)
+                    if match:
+                        data = json.loads(match.group(0))
+                        if "script" in data and "hook_text" in data:
+                            return data
+                    break
+                except Exception as e:
+                    # Free models are rate limited hard and 429 is routine, not
+                    # fatal - back off and give the next model a turn.
+                    text = str(e)
+                    if "429" in text and attempt == 0:
+                        time.sleep(4)
+                        continue
+                    print(f"Model {m} skipped: {text[:120]}")
+                    break
 
     return {
         "script": f"Day 44 in the flat, and {p1} just proved playpen fences are purely decorative while {p2} sat watching like the landlord. Which of your pets is the chaos gremlin?",
@@ -224,11 +252,98 @@ def format_ass_time(seconds: float) -> str:
         cs = 0
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
+def probe_duration(audio_path: str, default: float = 9.0) -> float:
+    """Measured length of a rendered audio file, in seconds."""
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
+        ]).strip()
+        value = float(out)
+        return value if value > 0.5 else default
+    except Exception:
+        return default
+
+
+def words_from_text(text: str) -> list[dict]:
+    """Split spoken text into the same word records Edge-TTS would have produced."""
+    tokens = strip_non_ascii(re.sub(r"[^\w\s']", " ", text)).upper().split()
+    return [{"text": t, "start": 0.0, "end": 0.0} for t in tokens if t]
+
+
+def rescale_word_timings(words: list[dict], duration: float) -> list[dict]:
+    """Lay words out across `duration`, weighting by length plus a pause budget.
+
+    Edge-TTS gives us real WordBoundary offsets. The OpenRouter and Fish voices
+    do not, and previously that meant the burned-in captions were either frozen
+    or anchored to the wrong clip - captions drifting out of sync with the voice
+    is one of the loudest "this is fake" signals there is.
+    """
+    if not words:
+        return words
+    # +2.2 approximates the inter-word gap a natural speaking voice leaves.
+    weights = [len(w["text"]) + 2.2 for w in words]
+    total = sum(weights) or 1.0
+    cursor = 0.0
+    for word, weight in zip(words, weights):
+        span = duration * (weight / total)
+        word["start"] = round(cursor, 3)
+        word["end"] = round(cursor + span, 3)
+        cursor += span
+    return words
+
+
+def ensure_voice_reference(voice_ref_path: str, edge_voice: str) -> str:
+    """Create the one-off voice sample that Fish clones from, once.
+
+    Edge-TTS renders a short neutral clip the first time only. Every later
+    episode passes that same clip as a cloning reference, so the channel keeps
+    a single consistent voice without ever paying for a custom voice plan.
+    """
+    os.makedirs(os.path.dirname(voice_ref_path), exist_ok=True)
+    if os.path.exists(voice_ref_path) and os.path.getsize(voice_ref_path) > 5_000:
+        return voice_ref_path
+
+    from src.openrouter_media import VOICE_REFERENCE_TRANSCRIPT
+
+    async def _speak():
+        communicate = edge_tts.Communicate(VOICE_REFERENCE_TRANSCRIPT, edge_voice, rate="+0%", pitch="+0Hz")
+        with open(voice_ref_path, "wb") as f:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+
+    asyncio.run(_speak())
+    print(f"Bootstrapped voice-clone reference at {voice_ref_path}")
+    return voice_ref_path
+
+
 async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_cfg: dict, audio_path: str, ass_path: str):
     clean_spoken = re.sub(r"\[.*?\]", "", raw_script).strip()
     voice_name = human_cfg.get("edge_voice", "en-GB-LibbyNeural")
     fish_key = os.environ.get("FISH_API_KEY", "").strip()
     used_fish = False
+    used_openrouter = False
+    voice_ref = os.path.join(MEDIA_DIR, "maya_voice_ref.mp3")
+
+    # 0. OpenRouter free-tier TTS. Fish is tried first because it is the only
+    # rung that can clone a voice, which is what keeps one recognisable voice
+    # across the whole channel instead of a new stranger every episode.
+    if os.environ.get("OPENROUTER_API_KEY", "").strip():
+        try:
+            ensure_voice_reference(voice_ref, voice_name)
+            result = synthesize_speech(
+                raw_script,
+                audio_path,
+                os.environ.get("FLUX_TTS_VOICE", "").strip(),
+                voice_ref,
+            )
+            used_openrouter = True
+            print(f"TTS via OpenRouter: {result['provider']}")
+        except Exception as e:
+            print(f"OpenRouter TTS unavailable ({str(e)[:140]}) - falling back")
+    else:
+        print("OPENROUTER_API_KEY not set - using Fish direct / Edge-TTS")
 
     # 1A. Try Fish Audio S2.1 Pro Free Direct API if FISH_API_KEY is configured
     if fish_key:
@@ -262,15 +377,16 @@ async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_c
                         s_sec = chunk["offset"] / TICKS_PER_SECOND
                         d_sec = chunk["duration"] / TICKS_PER_SECOND
                         words.append({"text": w_txt, "start": s_sec, "end": s_sec + d_sec})
-        if not used_fish and os.path.exists(temp_edge_audio) and os.path.getsize(temp_edge_audio) > 500:
+        if not (used_fish or used_openrouter) and os.path.exists(temp_edge_audio) and os.path.getsize(temp_edge_audio) > 500:
             shutil.move(temp_edge_audio, audio_path)
     except Exception as e:
         print(f"⚠️ Edge-TTS fallback: {e}")
         if not os.path.exists(audio_path):
-            subprocess.run([
-                "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "8",
-                "-c:a", "libmp3lame", audio_path
-            ], check=True)
+            # A silent reel is worse than no reel: the captions would desync
+            # against nothing and the watch page would ship a broken draft.
+            raise MediaGenerationError(
+                "no TTS provider produced usable audio; refusing to publish a silent reel"
+            )
 
     # Build strictly ASCII .ass subtitles (No emojis -> Zero [□] boxes!)
     ass_lines = [
@@ -283,6 +399,13 @@ async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_c
         "Style: HookBanner,DejaVu Sans,38,&H0000FFFF,&H0000FFFF,&H001E293B,&H001E293B,-1,0,0,0,100,100,1,0,3,16,0,8,40,40,120,1",
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
     ]
+
+    # The OpenRouter and Fish-direct voices do not report per-word offsets, so
+    # when one of them is the active voice we lay the words out across the real
+    # measured audio duration. Weighting by length plus a fixed per-word gap
+    # tracks natural pacing far better than a flat split.
+    if used_openrouter or used_fish:
+        words = rescale_word_timings(words_from_text(clean_spoken), probe_duration(audio_path))
 
     clean_hook = strip_non_ascii(hook_banner).upper()[:30] or "MAYA AND THE BUNS"
     ass_lines.append(f"Dialogue: 1,0:00:00.00,0:00:03.20,HookBanner,,0,0,0,,{clean_hook}")
@@ -308,37 +431,9 @@ async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_c
 # 2. FACE-LOCK (PuLID-Flux), NATIVE 9:16 FLUX, & LTX-VIDEO ANIMATOR
 # =====================================================================
 def fetch_flux_image(prompt: str, seed: int, out_path: str):
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
-    if hf_token:
-        try:
-            hf_url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
-            payload = {
-                "inputs": f"{prompt}, vertical 9:16 smartphone photography, natural home lighting, sharp focus, photorealistic",
-                "parameters": {"width": 768, "height": 1344, "num_inference_steps": 4, "seed": seed}
-            }
-            r = requests.post(hf_url, headers={"Authorization": f"Bearer {hf_token}"}, json=payload, timeout=40)
-            if r.status_code == 200 and (r.content.startswith(b"\xff\xd8") or r.content.startswith(b"\x89PNG")):
-                with open(out_path, "wb") as f:
-                    f.write(r.content)
-                return
-        except Exception as e:
-            print(f"⚠️ HF FLUX.1-schnell skipped: {e}")
+    """Render one beat through the validated provider ladder. Raises on failure."""
+    return generate_beat_image(prompt, seed, out_path)
 
-    encoded = urllib.parse.quote(prompt[:320])
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=1344&seed={seed}&model=flux&nologo=true"
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
-        if resp.status_code == 200 and (resp.content.startswith(b"\xff\xd8") or resp.content.startswith(b"\x89PNG")):
-            with open(out_path, "wb") as f:
-                f.write(resp.content)
-            return
-    except Exception:
-        pass
-
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x1e293b:s=720x1280:d=1",
-        "-frames:v", "1", out_path
-    ], check=True)
 
 def ensure_maya_master_face(c_data: dict) -> str:
     """
@@ -362,8 +457,16 @@ def ensure_maya_master_face(c_data: dict) -> str:
 
 def generate_maya_scene_with_pulid(master_face_path: str, prompt: str, seed: int, out_path: str):
     """
-    Locks Maya's facial bone structure, glasses, and hair using PuLID-Flux with master_face_path.
-    If the PuLID ZeroGPU queue is busy, copies master_face_path so her identity stays 100% consistent.
+    Renders a NEW reaction shot that still reads as Maya.
+
+    Identity is carried by handing the model the canonical portrait as a
+    reference image, which is the only thing in this pipeline that can actually
+    hold a face steady. The previous version caught every failure and quietly
+    copied the master portrait into the beat slot, so "Beat 1 (Face-Locked
+    Maya)" was literally the same JPEG as maya_master.jpg - byte for byte - and
+    the channel never changed expression, pose or framing at all.
+
+    If nothing can render, this raises. It must never substitute the master.
     """
     hf_token = os.environ.get("HF_TOKEN", "").strip()
     if HAS_GRADIO:
@@ -398,8 +501,15 @@ def generate_maya_scene_with_pulid(master_face_path: str, prompt: str, seed: int
                 print(f"ℹ️ PuLID Space busy ({e}), using canonical master portrait lock.")
                 break
 
-    # Identity-preserving fallback: use the locked master portrait so her face never changes
-    shutil.copy(master_face_path, out_path)
+    # PuLID ZeroGPU is queue-saturated in practice, which is exactly why the run
+    # in issue #6 ended up here every time. Fall through to the OpenRouter image
+    # API, which accepts the same reference portrait and is not queue-bound.
+    generate_beat_image(
+        prompt,
+        seed,
+        out_path,
+        reference_path=master_face_path,
+    )
 
 def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, out_mp4: str, pan_dir: int = 1):
     """
@@ -497,13 +607,7 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         script_data["script"], script_data["hook_text"], human, audio_path, ass_path
     ))
 
-    try:
-        duration = float(subprocess.check_output([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", audio_path
-        ]).strip())
-    except Exception:
-        duration = 9.0
+    duration = probe_duration(audio_path)
 
     # 2. BEAT 1: Face-Locked Maya Candid Reaction Hook (Uses Master Face + PuLID)
     master_face = ensure_maya_master_face(c_data)
@@ -528,6 +632,15 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         f"({morph1}), {script_data.get('pet2_action', 'sitting politely on oak floor')}, only one rabbit in frame, zero human hands"
     )
     fetch_flux_image(prompt_b3, pet1.get("pet_seed", 420881), b3_img)
+
+    # Final gate before anything reaches ffmpeg. Beat 3 of the run in issue #6
+    # was a flat colour card here, and it became 4.6s of black screen in the
+    # published MP4. Nothing unvalidated gets as far as the renderer.
+    for label, path in (("beat1", b1_img), ("beat2", b2_img), ("beat3", b3_img)):
+        ok, reason = validate_image(path)
+        if not ok:
+            raise MediaGenerationError(f"{label} failed validation ({reason}); aborting reel")
+        print(f"  [gate] {label} ok - {os.path.getsize(path) // 1024} KB")
 
     # 5. Animate Each Beat into Video Segments (LTX-Video AI Motion -> 4K Smooth Drift Fallback)
     d1 = round(max(2.2, duration * 0.28), 2)
@@ -674,6 +787,7 @@ def main():
         return
 
     latest_draft = None
+    failed_channels = []
     for c_key, c_data in bible.items():
         if not c_data.get("enabled", True):
             continue
@@ -683,7 +797,15 @@ def main():
         trends = fetch_safe_trends()
 
         script_data = write_daily_script(c_data, pets[:2], age_summary, trends[0])
-        render_video(c_key, c_data, pets[:2], age_data, script_data)
+        try:
+            render_video(c_key, c_data, pets[:2], age_data, script_data)
+        except MediaGenerationError as e:
+            # Do not queue a draft, do not open an issue, and above all do not
+            # leave a half-rendered MP4 sitting in docs/media where the watch
+            # page and the previous good reel would both pick it up.
+            print(f"ABORT {c_key}: {e}")
+            failed_channels.append({"channel": c_key, "error": str(e)})
+            continue
 
         pages_watch_url = f"https://{owner.lower()}.github.io/{repo_short}/watch/"
         raw_mp4_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_latest.mp4"
@@ -724,6 +846,8 @@ def main():
                 json={"title": f"🐾 [Draft] {c_name}: {latest_draft['hook_text']}", "body": issue_body}
             )
 
+    if failed_channels:
+        print("FAILED CHANNELS: " + json.dumps(failed_channels, indent=2))
     build_all_storefronts_and_grounding(latest_draft)
     with open(STATE_QUEUE, "w", encoding="utf-8") as f:
         json.dump(queue, f, indent=2)

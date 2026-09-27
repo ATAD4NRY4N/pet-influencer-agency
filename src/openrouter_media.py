@@ -1,0 +1,401 @@
+"""
+Free-first media providers for the agency.
+
+Everything goes through OpenRouter's unified API so the whole pipeline needs a
+single credential (OPENROUTER_API_KEY) instead of a scattering of vendor keys.
+
+Two rules this module exists to enforce:
+
+1. A generated image is either VALIDATED or it never reaches the renderer.
+   The previous pipeline silently substituted a flat `#1e293b` ffmpeg colour
+   card when an image provider failed, and that placeholder was then stitched
+   into the finished reel as 4.6s of black screen. We now raise instead.
+
+2. Text-to-image is free, but *identity-consistent* text-to-image is not.
+   A text prompt alone cannot hold a human face stable between episodes, so
+   the ladder has an optional rung that accepts a reference portrait.
+"""
+
+import base64
+import os
+import random
+import time
+
+import requests
+
+try:  # Pillow is used purely to validate what a provider handed back.
+    from PIL import Image, ImageStat
+except ImportError:  # pragma: no cover - validation degrades to byte checks
+    Image = None
+    ImageStat = None
+
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+# Spoken once by the bootstrap voice clip so the cloner knows what it is hearing.
+VOICE_REFERENCE_TRANSCRIPT = (
+    "Right, let's get straight to it. The little ones are already causing chaos "
+    "and honestly I could not ask for a better morning."
+)
+HTTP_TIMEOUT = 90
+
+# An image smaller than this is almost certainly an error card or a 1x1 stub.
+MIN_IMAGE_BYTES = 20_000
+# Standard deviation of the luma channel. Flat colour cards land near 0-3,
+# real photographs sit comfortably above 15 even in low light.
+MIN_LUMA_STDDEV = 12.0
+TARGET_ASPECT = 9 / 16
+ASPECT_TOLERANCE = 0.14
+
+# Ordered image ladder. Each rung is (key, model_id).
+#   pollinations  - $0, text-only, good raw quality, BUT cannot lock a face.
+#   gemini        - ~$0.00002/image, accepts a reference portrait, so Maya's
+#                   face, glasses and hair survive across episodes.
+# Default order puts gemini first because a drifting face is the single most
+# obvious "this is AI" tell. Set IMAGE_PROVIDER_ORDER=pollinations for strict $0.
+IMAGE_LADDER = {
+    "gemini": "google/gemini-2.5-flash-image",
+    "pollinations": "pollinations/flux",
+}
+
+# Ordered TTS ladder. Fish is first because it is the only rung that supports
+# stateless voice cloning, which is what keeps one recognisable voice across the
+# whole channel instead of a new stranger every episode.
+TTS_LADDER = [
+    {"key": "fish_openrouter", "model": "fish-audio/s2.1-pro-free:free", "clone": True},
+    {"key": "deepgram_openrouter", "model": "deepgram/flux-tts:free", "clone": False},
+]
+
+
+class MediaGenerationError(RuntimeError):
+    """Raised when no provider could produce a usable asset."""
+
+
+# --------------------------------------------------------------------------
+# transport
+# --------------------------------------------------------------------------
+def _api_key() -> str:
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not key:
+        raise MediaGenerationError("OPENROUTER_API_KEY is not set")
+    return key
+
+
+def _openrouter_post(path: str, payload: dict, *, raw: bool, attempts: int = 3) -> requests.Response:
+    """POST to OpenRouter with exponential backoff on rate limits.
+
+    Free-tier models are aggressively rate limited, and a bare retry loop that
+    gives up on the first 429 is the usual reason a daily run ships nothing.
+    """
+    url = f"{OPENROUTER_BASE}{path}"
+    headers = {
+        "Authorization": f"Bearer {_api_key()}",
+        "Content-Type": "application/json",
+    }
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
+        except requests.RequestException as exc:  # network hiccup / timeout
+            last_error = exc
+            time.sleep(2 * (attempt + 1))
+            continue
+
+        if resp.status_code == 429 or resp.status_code >= 500:
+            last_error = MediaGenerationError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+            retry_after = resp.headers.get("Retry-After")
+            wait = float(retry_after) if (retry_after or "").isdigit() else 2 ** (attempt + 1) + random.random()
+            time.sleep(min(wait, 30))
+            continue
+
+        if not resp.ok:
+            # 400 usually means "this rung does not accept that parameter" -
+            # surface it so the caller can drop the optional field and retry.
+            raise MediaGenerationError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+        if raw:
+            if len(resp.content) < 2_000:
+                raise MediaGenerationError("provider returned an empty audio stream")
+            return resp
+        return resp
+
+    raise MediaGenerationError(f"OpenRouter {path} failed after {attempts} attempts: {last_error}")
+
+
+# --------------------------------------------------------------------------
+# validation
+# --------------------------------------------------------------------------
+def validate_image(path: str) -> tuple[bool, str]:
+    """Reject anything that would look broken on screen.
+
+    Catches the three failure modes that actually shipped: a flat placeholder
+    colour card, a provider error stub, and a wrong-orientation render that
+    would get pillarboxed into black bars.
+    """
+    if not os.path.exists(path):
+        return False, "file does not exist"
+    if os.path.getsize(path) < MIN_IMAGE_BYTES:
+        return False, f"file too small ({os.path.getsize(path)} bytes)"
+
+    if Image is None:
+        return True, "ok (Pillow unavailable, byte check only)"
+
+    try:
+        with Image.open(path) as im:
+            im.load()
+            width, height = im.size
+            if width < 384 or height < 384:
+                return False, f"resolution too low ({width}x{height})"
+            aspect = width / height
+            if abs(aspect - TARGET_ASPECT) > ASPECT_TOLERANCE:
+                return False, f"not 9:16 (got {width}x{height}, aspect {aspect:.3f})"
+            luma_stddev = ImageStat.Stat(im.convert("L")).stddev[0]
+            if luma_stddev < MIN_LUMA_STDDEV:
+                return False, f"image is flat (luma stddev {luma_stddev:.1f} < {MIN_LUMA_STDDEV})"
+    except Exception as exc:
+        return False, f"unreadable image: {exc}"
+
+    return True, "ok"
+
+
+def _write_data_url_image(reference_path: str) -> str:
+    with open(reference_path, "rb") as fh:
+        encoded = base64.b64encode(fh.read()).decode("ascii")
+    ext = os.path.splitext(reference_path)[1].lstrip(".").lower() or "jpeg"
+    if ext == "jpg":
+        ext = "jpeg"
+    return f"data:image/{ext};base64,{encoded}"
+
+
+# --------------------------------------------------------------------------
+# images
+# --------------------------------------------------------------------------
+def _generate_via_openrouter(prompt: str, seed: int, out_path: str, reference_path: str | None) -> None:
+    ladder_order = os.environ.get("IMAGE_PROVIDER_ORDER", "gemini,pollinations")
+    model = None
+    for key in [k.strip() for k in ladder_order.split(",") if k.strip()]:
+        if key in IMAGE_LADDER:
+            model = IMAGE_LADDER[key]
+            break
+    if not model:
+        raise MediaGenerationError(f"No usable image model in IMAGE_PROVIDER_ORDER={ladder_order!r}")
+
+    base = {"model": model, "prompt": prompt}
+
+    # Not every image model advertises aspect_ratio or n in supported_parameters,
+    # and OpenRouter rejects an unsupported combination with a 400 rather than
+    # quietly ignoring it. So we walk a ladder of progressively plainer payloads
+    # and keep the first one the model actually accepts, rather than assuming.
+    #
+    # The reference portrait is the first thing to go: it is the biggest quality
+    # win, but a model that cannot take references should still render the beat.
+    candidates = []
+    if reference_path and os.path.exists(reference_path):
+        candidates.append({**base, "aspect_ratio": "9:16", "seed": seed, "n": 1,
+                           "input_references": [
+                               {"type": "image_url", "image_url": {"url": _write_data_url_image(reference_path)}}
+                           ]})
+    candidates.append({**base, "aspect_ratio": "9:16", "seed": seed, "n": 1})
+    candidates.append({**base, "aspect_ratio": "9:16"})
+    candidates.append(dict(base))
+
+    last_error = None
+    for payload in candidates:
+        try:
+            resp = _openrouter_post("/images", payload, raw=False, attempts=2)
+        except MediaGenerationError as exc:
+            if "HTTP 400" in str(exc):
+                # Capability gap, not an outage. Try the next plainer payload.
+                last_error = exc
+                extra = sorted(set(payload) - set(base))
+                print(f"i: {model} rejected a payload carrying {extra or ['defaults only']}; retrying plainer")
+                continue
+            raise
+        _save_image_response(resp, out_path, model, reference_path)
+        return
+
+    raise MediaGenerationError(f"{model} rejected every payload shape: {last_error}")
+
+
+def _save_image_response(resp: requests.Response, out_path: str, model: str, reference_path: str | None) -> None:
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise MediaGenerationError(f"{model} returned non-JSON: {resp.text[:200]}") from exc
+
+    entries = body.get("data") or []
+    if not entries:
+        raise MediaGenerationError(f"{model} returned no image data: {json.dumps(body)[:200]}")
+
+    entry = entries[0]
+    if entry.get("b64_json"):
+        blob = base64.b64decode(entry["b64_json"])
+    elif entry.get("url"):
+        downloaded = requests.get(entry["url"], timeout=HTTP_TIMEOUT)
+        if not downloaded.ok:
+            raise MediaGenerationError(f"{model} image URL fetch failed: HTTP {downloaded.status_code}")
+        blob = downloaded.content
+    else:
+        raise MediaGenerationError(f"{model} response had neither b64_json nor url")
+
+    with open(out_path, "wb") as fh:
+        fh.write(blob)
+
+    ok, reason = validate_image(out_path)
+    if not ok:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise MediaGenerationError(f"{model} produced an unusable image: {reason}")
+
+
+def _generate_via_pollinations(prompt: str, seed: int, out_path: str) -> None:
+    import urllib.parse
+
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        f"{urllib.parse.quote(prompt[:900])}?width=768&height=1344&seed={seed}&model=flux&nologo=true"
+    )
+    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+    if not resp.ok:
+        raise MediaGenerationError(f"pollinations HTTP {resp.status_code}")
+
+    with open(out_path, "wb") as fh:
+        fh.write(resp.content)
+
+    ok, reason = validate_image(out_path)
+    if not ok:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise MediaGenerationError(f"pollinations produced an unusable image: {reason}")
+
+
+def generate_beat_image(
+    prompt: str,
+    seed: int,
+    out_path: str,
+    reference_path: str | None = None,
+    log=print,
+) -> str:
+    """Render one 9:16 beat, or raise.
+
+    There is deliberately no placeholder branch. A caller that gets a
+    MediaGenerationError should abandon the reel rather than publish a black
+    rectangle - a failed run is recoverable, a published broken reel is not.
+    """
+    order = [k.strip() for k in os.environ.get("IMAGE_PROVIDER_ORDER", "gemini,pollinations").split(",") if k.strip()]
+    errors = []
+
+    for attempt in range(1, 3):  # one retry with a fresh seed: providers flake
+        for key in order:
+            if key == "pollinations":
+                try:
+                    _generate_via_pollinations(prompt, seed + attempt, out_path)
+                    log(f"  [image] pollinations/flux ok (seed {seed + attempt})")
+                    return out_path
+                except MediaGenerationError as exc:
+                    errors.append(f"pollinations: {exc}")
+            elif key in IMAGE_LADDER:
+                try:
+                    _generate_via_openrouter(prompt, seed + attempt, out_path, reference_path)
+                    log(f"  [image] {IMAGE_LADDER[key]} ok (seed {seed + attempt}, ref={'yes' if reference_path else 'no'})")
+                    return out_path
+                except MediaGenerationError as exc:
+                    errors.append(f"{IMAGE_LADDER[key]}: {exc}")
+            else:
+                errors.append(f"unknown provider key: {key}")
+
+    raise MediaGenerationError(
+        "every image provider failed for this beat:\n    " + "\n    ".join(errors)
+    )
+
+
+# --------------------------------------------------------------------------
+# text to speech
+# --------------------------------------------------------------------------
+def _fish_emotion_tags(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"\[([^\]]{1,24})\]", text)
+
+
+def _strip_emotion_tags(text: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", re.sub(r"\[[^\]]{1,24}\]", "", text)).strip()
+
+
+def synthesize_speech(
+    text: str,
+    out_path: str,
+    voice: str,
+    voice_reference_path: str | None = None,
+    log=print,
+) -> dict:
+    """Speak `text` to `out_path` (mp3).
+
+    Returns a dict describing how it was produced so the caption builder knows
+    whether real word timings are available:
+
+        {"provider": str, "has_word_boundaries": bool, "text": str}
+    """
+    order = [r["key"] for r in TTS_LADDER]
+    if os.environ.get("TTS_PROVIDER"):
+        wanted = os.environ["TTS_PROVIDER"].strip()
+        order = [k for k in order if k == wanted] or [wanted]
+
+    errors = []
+    for rung in TTS_LADDER:
+        if rung["key"] not in order:
+            continue
+        try:
+            # Fish understands [sigh]/[laughing] inline and they are part of the
+            # performance. Deepgram does not - it would read them out loud, so
+            # they get stripped before it ever sees the text.
+            spoken = text if rung["key"] == "fish_openrouter" else _strip_emotion_tags(text)
+
+            payload = {
+                "model": rung["model"],
+                "input": spoken,
+                "response_format": "mp3",
+            }
+            if voice:
+                payload["voice"] = voice
+
+            if rung["clone"] and voice_reference_path and os.path.exists(voice_reference_path):
+                with open(voice_reference_path, "rb") as fh:
+                    encoded = base64.b64encode(fh.read()).decode("ascii")
+                payload["input_references"] = [
+                    {"type": "input_audio", "input_audio": {"data": f"data:audio/mpeg;base64,{encoded}"}},
+                    {"type": "text", "text": VOICE_REFERENCE_TRANSCRIPT},
+                ]
+
+            try:
+                resp = _openrouter_post("/audio/speech", payload, raw=True)
+            except MediaGenerationError as exc:
+                # "voice" is provider-specific: an unknown voice id is a 400, and
+                # retrying without it lets a provider-side default take over.
+                if voice and "HTTP 400" in str(exc):
+                    payload.pop("voice", None)
+                    resp = _openrouter_post("/audio/speech", payload, raw=True)
+                    voice = ""
+                else:
+                    raise
+
+            with open(out_path, "wb") as fh:
+                fh.write(resp.content)
+
+            log(f"  [tts] {rung['model']} ok ({len(resp.content) // 1024} KB, clone={'yes' if payload.get('input_references') else 'no'})")
+            return {
+                "provider": rung["model"],
+                "has_word_boundaries": False,
+                "text": spoken,
+                "emotion_tags": _fish_emotion_tags(text) if rung["key"] == "fish_openrouter" else [],
+            }
+        except MediaGenerationError as exc:
+            errors.append(f"{rung['model']}: {exc}")
+
+    raise MediaGenerationError("every TTS provider failed:\n    " + "\n    ".join(errors))
