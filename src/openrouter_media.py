@@ -23,6 +23,8 @@ import time
 
 import requests
 
+import src.billing as billing
+
 try:  # Pillow is used purely to validate what a provider handed back.
     from PIL import Image, ImageStat
 except ImportError:  # pragma: no cover - validation degrades to byte checks
@@ -47,15 +49,19 @@ TARGET_ASPECT = 9 / 16
 ASPECT_TOLERANCE = 0.14
 
 # Ordered image ladder. Each rung is (key, model_id).
-#   pollinations  - $0, text-only, good raw quality, BUT cannot lock a face.
-#   gemini        - ~$0.00002/image, accepts a reference portrait, so Maya's
-#                   face, glasses and hair survive across episodes.
-# Default order puts gemini first because a drifting face is the single most
-# obvious "this is AI" tell. Set IMAGE_PROVIDER_ORDER=pollinations for strict $0.
+#   pollinations  - $0 via OpenRouter's free bridge, text-only, BUT cannot lock
+#                   a face, so Maya drifts between episodes.
+#   gemini        - ~$0.00003/image, accepts a reference portrait, so Maya's
+#                   face, glasses and hair survive across episodes. PAID.
+#
+# The order below is the *preference* order. src.billing.py then removes any
+# rung the current billing policy refuses, so under the default free-only
+# policy this collapses to pollinations regardless of the order.
 IMAGE_LADDER = {
     "gemini": "google/gemini-2.5-flash-image",
     "pollinations": "pollinations/flux",
 }
+DEFAULT_IMAGE_ORDER = "gemini,pollinations"
 
 # Ordered TTS ladder. Fish is first because it is the only rung that supports
 # stateless voice cloning, which is what keeps one recognisable voice across the
@@ -171,14 +177,16 @@ def _write_data_url_image(reference_path: str) -> str:
 # images
 # --------------------------------------------------------------------------
 def _generate_via_openrouter(prompt: str, seed: int, out_path: str, reference_path: str | None) -> None:
-    ladder_order = os.environ.get("IMAGE_PROVIDER_ORDER", "gemini,pollinations")
-    model = None
-    for key in [k.strip() for k in ladder_order.split(",") if k.strip()]:
-        if key in IMAGE_LADDER:
-            model = IMAGE_LADDER[key]
-            break
-    if not model:
-        raise MediaGenerationError(f"No usable image model in IMAGE_PROVIDER_ORDER={ladder_order!r}")
+    ladder_order = os.environ.get("IMAGE_PROVIDER_ORDER", DEFAULT_IMAGE_ORDER)
+    allowed = billing.filter_ladder(
+        [k.strip() for k in ladder_order.split(",") if k.strip()], IMAGE_LADDER, "image"
+    )
+    if not allowed:
+        raise MediaGenerationError(
+            f"no free OpenRouter image model is permitted "
+            f"(IMAGE_PROVIDER_ORDER={ladder_order!r}, free_only={billing.free_only()})"
+        )
+    model = allowed[0][1]
 
     base = {"model": model, "prompt": prompt}
 
@@ -286,8 +294,19 @@ def generate_beat_image(
     MediaGenerationError should abandon the reel rather than publish a black
     rectangle - a failed run is recoverable, a published broken reel is not.
     """
-    order = [k.strip() for k in os.environ.get("IMAGE_PROVIDER_ORDER", "gemini,pollinations").split(",") if k.strip()]
+    order = [k.strip() for k in os.environ.get("IMAGE_PROVIDER_ORDER", DEFAULT_IMAGE_ORDER).split(",") if k.strip()]
     errors = []
+
+    # A paid rung is dropped by billing.filter_ladder rather than attempted,
+    # so the free entries after it still get their turn. This matters most for
+    # "gemini": it is first in the preference order, so without the filter the
+    # run would spend money before ever considering the free option.
+    order = [k for k, _ in billing.filter_ladder(order, IMAGE_LADDER, "image")]
+    if not order:
+        raise MediaGenerationError(
+            "no permitted image provider (billing policy refuses every rung; "
+            "set OPENROUTER_FREE_ONLY=0 to allow paid models)"
+        )
 
     for attempt in range(1, 3):  # one retry with a fresh seed: providers flake
         for key in order:
@@ -346,6 +365,19 @@ def synthesize_speech(
     if os.environ.get("TTS_PROVIDER"):
         wanted = os.environ["TTS_PROVIDER"].strip()
         order = [k for k in order if k == wanted] or [wanted]
+
+    # Both current TTS rungs are ":free", so this changes nothing today. It is
+    # here so that editing TTS_LADDER to add a paid voice fails closed rather
+    # than quietly billing the channel every episode.
+    permitted = [k for k, _ in billing.filter_ladder(
+        order, {r["key"]: r["model"] for r in TTS_LADDER}, "tts"
+    )]
+    for key in order:
+        if key not in permitted:
+            log(f"  [tts] skipping {key} - refused by the free-only billing policy")
+    order = permitted
+    if not order:
+        raise MediaGenerationError("every TTS rung is refused by the billing policy")
 
     errors = []
     for rung in TTS_LADDER:

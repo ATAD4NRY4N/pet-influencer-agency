@@ -49,6 +49,7 @@ from src.openrouter_media import (
     _api_key,
     _openrouter_post,
 )
+import src.billing as billing
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
@@ -78,13 +79,33 @@ MAX_DRIFT = 34.0
 REFERENCE_MAX_SIDE = 768
 
 # Ordered ladder, cheapest-and-best first. All three accept image+text input,
-# which is the only hard requirement for a re-anchored chain.
+# which is the only hard requirement for a re-anchored chain. All three are
+# PAID - OpenRouter publishes no free image-output model at all - so under the
+# default free-only billing policy every rung is dropped and this provider
+# reports itself unavailable rather than spending.
 FRAME_LADDER = {
     "gemini_flash": "google/gemini-2.5-flash-image",
     "gpt5_mini": "openai/gpt-5-image-mini",
     "gemini_31": "google/gemini-3.1-flash-image",
 }
 DEFAULT_FRAME_ORDER = "gemini_flash,gpt5_mini,gemini_31"
+
+# Interpolation rungs, richest first. `{fps}` is substituted.
+#
+#   mci     - motion-compensated interpolation, real optical flow. Best result,
+#             but the aobmc/bidir combination is not reliable across ffmpeg
+#             builds (it fails at EOF on ffmpeg 6.x).
+#   mci_obb - same motion compensation with the simpler, older OBMC mode.
+#   blend   - blends neighbouring frames; no motion estimation, so it cannot
+#             fail on "invalid data" and is a safe smooth-looking result.
+#   fps     - frame duplication. Always works; last resort so a paid chain is
+#             never thrown away over a filter setting.
+INTERPOLATION_LADDER = [
+    ("mci", "minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"),
+    ("mci_obb", "minterpolate=fps={fps}:mi_mode=mci:mc_mode=obmc:me_mode=bidir"),
+    ("blend", "minterpolate=fps={fps}:mi_mode=blend"),
+    ("fps", "fps={fps}"),
+]
 
 STYLE_LOCK = (
     "identical framing, identical camera position, identical lighting, "
@@ -325,9 +346,16 @@ def _generate_chain(
         for k in os.environ.get("FRAME_PROVIDER_ORDER", DEFAULT_FRAME_ORDER).split(",")
         if k.strip()
     ]
-    models = [(k, FRAME_LADDER[k]) for k in order if k in FRAME_LADDER]
+    models = [(k, m) for k, m in billing.filter_ladder(order, FRAME_LADDER, "frame diffusion")]
     if not models:
-        raise FrameDiffusionError(f"no usable model in FRAME_PROVIDER_ORDER={order!r}")
+        # Do not start generating: under the free-only policy this is the
+        # expected path, and the caller needs a clear reason to fall back
+        # rather than a wall of per-frame billing errors.
+        raise FrameDiffusionError(
+            "no free image model is permitted, so frame diffusion cannot run "
+            "(every FRAME_LADDER entry is a paid OpenRouter model). Characters "
+            "will fall back to the free rungs."
+        )
 
     paths: list[str] = []
     # A model that fails on frame 3 should not doom frames 4..N. Remember which
@@ -440,7 +468,19 @@ def animate_still_to_clip(
 
     # Cost is per generated frame, so it is knowable before spending anything.
     # ~$0.00003/frame on gemini-2.5-flash-image puts a full 3-beat ~11s reel
-    # near $0.003, or ~$0.006 if a beat needs the amplified retry.
+    # near $0.003, or ~$0.006 if a beat needs the amplified retry. Under the
+    # default free-only policy none of this is spent: the ladder check below
+    # refuses every rung first.
+    if not billing.filter_ladder(
+        [n.strip() for n in os.environ.get("FRAME_PROVIDER_ORDER", DEFAULT_FRAME_ORDER).split(",") if n.strip()],
+        FRAME_LADDER,
+        "frame diffusion",
+    ):
+        raise FrameDiffusionError(
+            "frame diffusion is disabled by the free-only billing policy "
+            "(all of its models are paid); no credit was spent"
+        )
+
     est = frame_count * 0.00003 * int(os.environ.get("FRAME_ATTEMPTS", "2"))
     log(f"  [fd] budget: ~{frame_count} frames x up to {os.environ.get('FRAME_ATTEMPTS', '2')} "
         f"attempts = ~${est:.4f} for this beat")
@@ -473,22 +513,47 @@ def animate_still_to_clip(
             # second into something that reads as smooth video rather than a
             # flipbook. It also hides the small inconsistencies between
             # independently generated frames.
-            proc = _run([
-                FFMPEG_BIN, "-y", "-v", "error",
-                "-framerate", str(src_fps),
-                "-i", os.path.join(workdir, "f%04d.jpg"),
-                "-t", str(duration),
-                "-vf", (
-                    f"minterpolate=fps={OUTPUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
+            # Interpolation filter ladder.
+            #
+            # The first rung (motion-compensated bidirectional optical flow) is
+            # the best-looking but the least portable. On CI's ffmpeg 6.1.1 it
+            # died with "Invalid data found when processing input" / "Error
+            # marking filters as finished" at EOF - a known minterpolate
+            # failure mode with aobmc + bidir. That single filter failure threw
+            # away ~100 correctly generated frames per reel, i.e. the frames
+            # we had already paid for.
+            #
+            # So each rung is a progressively more conservative interpolation,
+            # and the first that produces a playable file wins. Plain `fps`
+            # cannot fail on motion data at all, which guarantees the chain is
+            # never wasted.
+            for filter_label, interp in INTERPOLATION_LADDER:
+                vf = (
+                    f"{interp.format(fps=OUTPUT_FPS)},"
                     f"scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
                     f"setsar=1,format=yuv420p"
-                ),
-                "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-                out_path,
-            ], timeout=600)
-            if proc.returncode != 0 or not os.path.exists(out_path):
+                )
+                proc = _run([
+                    FFMPEG_BIN, "-y", "-v", "error",
+                    "-framerate", str(src_fps),
+                    "-i", os.path.join(workdir, "f%04d.jpg"),
+                    "-t", str(duration),
+                    "-vf", vf,
+                    "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                    out_path,
+                ], timeout=900)
+
+                if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 10_000:
+                    if filter_label != "mci":
+                        log(f"  [fd] interpolation fell back to '{filter_label}' "
+                            f"(richer optical-flow modes are unavailable on this ffmpeg)")
+                    break
+
+                tail = (proc.stderr or "").strip().splitlines()
+                log(f"  [fd] interpolation '{filter_label}' failed: {tail[-1][:150] if tail else 'unknown'}")
+            else:
                 raise FrameDiffusionError(
-                    f"ffmpeg interpolation failed: {(proc.stderr or '')[-300:]}"
+                    f"every interpolation mode failed; last error: {tail[-1][:200] if tail else 'unknown'}"
                 )
 
             size = os.path.getsize(out_path)

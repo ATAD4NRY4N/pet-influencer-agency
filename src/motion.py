@@ -217,7 +217,12 @@ def _via_ltx(img_path: str, prompt: str, out_path: str, duration: float, hf_toke
         mode="image-to-video",
         duration_ui=duration,
         ui_frames_to_use=9,
-        seed_ui=-1,
+        # The Space's seed input is a slider with minimum 0. Passing -1 (the
+        # "random" sentinel several Gradio demos accept) is rejected outright:
+        # "AppError: Value -1 is less than minimum value 0." That was the whole
+        # reason this free rung never produced a clip, and with the paid rungs
+        # switched off it is the main remaining route to free animation.
+        seed_ui=random.randint(0, 2_147_483_647),
         randomize_seed=True,
         ui_guidance_scale=1.0,
         improve_texture_flag=True,

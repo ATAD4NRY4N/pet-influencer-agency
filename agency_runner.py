@@ -24,6 +24,7 @@ from src.openrouter_media import (
     validate_image,
 )
 from src.motion import MOTION_THRESHOLD, MotionError, generate_i2v_clip, measure_motion
+import src.billing as billing
 
 try:
     from gradio_client import Client, handle_file
@@ -293,12 +294,22 @@ def rescale_word_timings(words: list[dict], duration: float) -> list[dict]:
     return words
 
 
-def ensure_voice_reference(voice_ref_path: str, edge_voice: str) -> str:
+async def ensure_voice_reference(voice_ref_path: str, edge_voice: str) -> str:
     """Create the one-off voice sample that Fish clones from, once.
 
     Edge-TTS renders a short neutral clip the first time only. Every later
     episode passes that same clip as a cloning reference, so the channel keeps
     a single consistent voice without ever paying for a custom voice plan.
+
+    This MUST be a coroutine. It is called from generate_voice_and_captions(),
+    which is itself driven by asyncio.run(). The previous version was a plain
+    function that called asyncio.run() internally, which always raises
+    "asyncio.run() cannot be called from a running event loop" - and because
+    the coroutine was built as that call's argument, it was then never awaited
+    (the RuntimeWarning in the run log). The resulting exception was caught by
+    a broad `except Exception` that reported "OpenRouter TTS unavailable", so
+    the free OpenRouter TTS rung silently never ran and every episode fell
+    back to Fish/Edge without anyone noticing.
     """
     os.makedirs(os.path.dirname(voice_ref_path), exist_ok=True)
     if os.path.exists(voice_ref_path) and os.path.getsize(voice_ref_path) > 5_000:
@@ -306,15 +317,17 @@ def ensure_voice_reference(voice_ref_path: str, edge_voice: str) -> str:
 
     from src.openrouter_media import VOICE_REFERENCE_TRANSCRIPT
 
-    async def _speak():
-        communicate = edge_tts.Communicate(VOICE_REFERENCE_TRANSCRIPT, edge_voice, rate="+0%", pitch="+0Hz")
-        with open(voice_ref_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
+    communicate = edge_tts.Communicate(VOICE_REFERENCE_TRANSCRIPT, edge_voice, rate="+0%", pitch="+0Hz")
+    written = 0
+    with open(voice_ref_path, "wb") as f:
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                f.write(chunk["data"])
+                written += len(chunk["data"])
 
-    asyncio.run(_speak())
-    print(f"Bootstrapped voice-clone reference at {voice_ref_path}")
+    if written < 5_000:
+        raise RuntimeError(f"voice reference render produced only {written} bytes")
+    print(f"Bootstrapped voice-clone reference at {voice_ref_path} ({written // 1024} KB)")
     return voice_ref_path
 
 
@@ -331,7 +344,7 @@ async def generate_voice_and_captions(raw_script: str, hook_banner: str, human_c
     # across the whole channel instead of a new stranger every episode.
     if os.environ.get("OPENROUTER_API_KEY", "").strip():
         try:
-            ensure_voice_reference(voice_ref, voice_name)
+            await ensure_voice_reference(voice_ref, voice_name)
             result = synthesize_speech(
                 raw_script,
                 audio_path,
@@ -783,6 +796,34 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
             f"<p><a href='grounding/' style='color:#f59e0b;font-weight:700;font-size:18px;'>🛡️ Open Universe Grounding Bible →</a></p></body></html>"
         )
 
+def announce_billing_policy():
+    """State the spend policy once, before anything can cost anything.
+
+    Silence here is how a $0 run quietly becomes a paid one, so the banner
+    names what is allowed and, crucially, what has been switched off.
+    """
+    if not billing.free_only():
+        print("[billing] WARNING: OPENROUTER_FREE_ONLY=0 - PAID OpenRouter models are permitted.")
+        print("[billing] Paid rungs are active and WILL spend credit.")
+        return
+
+    print("[billing] FREE-ONLY: no paid OpenRouter model may be called.")
+    import src.frame_diffusion as fd
+    import src.openrouter_media as om
+
+    paid_images = [m for m in om.IMAGE_LADDER.values() if not billing.is_free(m)]
+    paid_frames = [m for m in fd.FRAME_LADDER.values() if not billing.is_free(m)]
+    print(f"[billing]   image rungs refused : {', '.join(paid_images) or 'none'}")
+    if paid_frames:
+        print(f"[billing]   FRAME DIFFUSION OFF : {', '.join(paid_frames)}")
+        print("[billing]   -> beats fall back to the still-camera-pan unless a free")
+        print("[billing]      image-to-video rung (HF Spaces) succeeds. Expect a")
+        print("[billing]      motionless reel and a 'DEGRADED' notice; this is the")
+        print("[billing]      cost of running at $0, not a bug.")
+    free_tts = [r["model"] for r in om.TTS_LADDER if billing.is_free(r["model"])]
+    print(f"[billing]   TTS (already free)  : {', '.join(free_tts) or 'none'}")
+
+
 def main():
     bible = ensure_json_file(STATE_BIBLE, DEFAULT_BIBLE, required_subkey="bio_slug")
     queue = ensure_json_file(STATE_QUEUE, DEFAULT_QUEUE)
@@ -791,6 +832,8 @@ def main():
 
     if os.environ.get("EVENT_NAME", "") in ("issues", "issue_comment"):
         return
+
+    announce_billing_policy()
 
     latest_draft = None
     failed_channels = []
