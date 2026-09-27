@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import time
+import shutil
 import asyncio
 import subprocess
 import urllib.parse
@@ -14,6 +16,12 @@ try:
     HAS_OPENAI = True
 except Exception:
     HAS_OPENAI = False
+
+try:
+    from gradio_client import Client, handle_file
+    HAS_GRADIO = True
+except Exception:
+    HAS_GRADIO = False
 
 STATE_DIR = "state"
 DOCS_DIR = "docs"
@@ -35,20 +43,21 @@ DEFAULT_BIBLE = {
             "name": "Maya",
             "age": 26,
             "edge_voice": "en-GB-SoniaNeural",
-            "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with subtle freckles, hazel-green eyes behind thin round gold glasses, wavy chestnut hair in a claw clip",
+            "immutable_face_dna": "26-year-old British woman Maya, oval face, warm fair skin with light nose-bridge freckles, hazel-green eyes behind thin round gold wireframe glasses, wavy chestnut hair pulled half-up in a tortoiseshell claw clip",
             "expressions": {
-                "SMILE_WARM": "gentle closed-lip warm smile",
-                "SMILE_LAUGH": "natural laughing smile",
-                "EXPRESSION_DEADPAN": "deadpan dry flat-line mouth, raised left eyebrow"
+                "SMILE_WARM": "gentle closed-lip warm smile with a subtle left-cheek dimple",
+                "SMILE_LAUGH": "natural open-mouth laughing smile, crinkled amused eyes",
+                "EXPRESSION_DEADPAN": "deadpan unimpressed expression raising one eyebrow at the camera"
             },
             "wardrobe_rotation": [
-                "oversized sage-green chunky waffle-knit cardigan over a white crewneck tee"
+                "oversized sage-green chunky waffle-knit cardigan over a white crewneck tee",
+                "oatmeal ribbed crewneck jumper with rolled sleeves"
             ]
         },
         "locations": {
-            "SET_A_SOFA": "bright Scandi living room, sitting by an oatmeal boucle sofa, sage-green wall, herringbone oak floor",
-            "SET_B_KITCHEN": "oak butcher-block kitchen island, matte cream shaker cabinets, bright morning daylight",
-            "SET_C_RUG_POV": "high-angle first-person POV looking down at a braided cream jute rug over oak flooring"
+            "SET_A_SOFA": "inside a bright Scandi living room, sitting by an oatmeal boucle sofa, matte sage-green panelled wall behind, potted monstera plant on left, warm window daylight, herringbone oak floor",
+            "SET_B_KITCHEN": "standing at an oak butcher-block kitchen island, matte cream shaker cabinets and white subway tile splashback behind her, morning daylight",
+            "SET_C_RUG_POV": "high-angle first-person POV smartphone shot looking down at a braided cream jute rug over herringbone oak flooring, black wire playpen fence on top edge"
         },
         "pets": [
             {
@@ -58,7 +67,7 @@ DEFAULT_BIBLE = {
                 "birth_date": "2026-05-10",
                 "pet_seed": 420881,
                 "role": "The polite food critic",
-                "immutable_marking_dna": "cream-white Holland Lop rabbit with floppy ears where ONLY the left ear is charcoal-grey"
+                "immutable_marking_dna": "cream-white Holland Lop rabbit with floppy ears where ONLY the left ear is dark charcoal-grey and the right ear is cream"
             },
             {
                 "id": "pip",
@@ -67,7 +76,7 @@ DEFAULT_BIBLE = {
                 "birth_date": "2026-07-15",
                 "pet_seed": 420882,
                 "role": "The cable-chewing chaos gremlin",
-                "immutable_marking_dna": "jet-black Lionhead rabbit with upright ears and a white fluffy mane tuft between his ears"
+                "immutable_marking_dna": "jet-black Lionhead rabbit with upright black ears and a distinct snow-white fluffy mane tuft right between his ears"
             },
             {
                 "id": "clover",
@@ -76,7 +85,7 @@ DEFAULT_BIBLE = {
                 "birth_date": "2026-07-15",
                 "pet_seed": 420883,
                 "role": "The zoomie queen",
-                "immutable_marking_dna": "cinnamon-amber and white Dutch rabbit with a white nose blaze"
+                "immutable_marking_dna": "cinnamon-amber and white Dutch rabbit with a crisp white shoulder saddle and white nose blaze"
             }
         ]
     }
@@ -122,7 +131,6 @@ def ensure_json_file(path: str, default_data: dict, required_subkey: str = None)
                     data = loaded
         except Exception:
             data = None
-
     if data is None:
         data = default_data
         with open(path, "w", encoding="utf-8") as f:
@@ -135,8 +143,13 @@ def calculate_age_stats(birth_date_str: str) -> dict:
         age_days = max(1, (datetime.now(timezone.utc) - birth_dt).days)
     except Exception:
         age_days = 75
-    stage = "baby_kit" if age_days < 90 else ("adolescent" if age_days < 180 else "prime_adult")
-    return {"age_days": age_days, "age_weeks": round(age_days / 7.0, 1), "stage": stage, "morphology": f"{stage} rabbit"}
+    if age_days < 90:
+        stage, morph = "baby_kit", "tiny palm-sized baby kit with oversized ears and downy fluff fur"
+    elif age_days < 180:
+        stage, morph = "adolescent", "juvenile half-grown adolescent rabbit with lanky body proportions"
+    else:
+        stage, morph = "prime_adult", "full-grown prime adult rabbit with dense glossy fur"
+    return {"age_days": age_days, "age_weeks": round(age_days / 7.0, 1), "stage": stage, "morphology": morph}
 
 def fetch_safe_trends() -> list[str]:
     try:
@@ -160,10 +173,14 @@ def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary:
     if HAS_OPENAI and api_key:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
         prompt = (
-            f"Write a 32-word TikTok/Reel voiceover for {human_name} (26yo UK pet owner) with her rabbits ({pet_names}).\n"
-            f"Ages:\n{age_summary}\nTopic: {trend}\n"
-            "End with a relatable question for pet owners in the comments. Return ONLY valid JSON:\n"
-            '{"script": "spoken words...", "hook_text": "4-word banner hook", "beat2_action": "rabbits exploring the rug"}'
+            f"Write a 34-word vertical TikTok/Reel voiceover for {human_name} (26yo UK creator) with her rabbits ({pet_names}).\n"
+            f"Current Pet Ages:\n{age_summary}\nTopic: {trend}\n"
+            "Rules:\n"
+            "1. Sound like a genuine UK pet owner ('flat', 'proper', 'sorted').\n"
+            "2. End with a relatable question for pet owners in the comments that grammatically loops back into the first word.\n"
+            "Return ONLY valid JSON:\n"
+            '{"script": "spoken words...", "hook_text": "4-WORD UPPERCASE HOOK", '
+            '"beat2_action": "two rabbits investigating a wooden hay rack on the braided jute rug"}'
         )
         for m in ["openrouter/free", "meta-llama/llama-3.3-70b-instruct:free", "google/gemma-3-27b-it:free"]:
             try:
@@ -179,9 +196,21 @@ def write_daily_script(channel_meta: dict, chosen_pets: list[dict], age_summary:
 
     return {
         "script": "Day 42 with three house rabbits, and Pip just proved playpen fences are purely decorative. Barnaby didn't even blink. Which of your pets is the chaos gremlin?",
-        "hook_text": "Three Rabbits vs One Flat",
-        "beat2_action": "rabbits foraging together on the living room jute rug"
+        "hook_text": "3 RABBITS VS 1 FLAT",
+        "beat2_action": "rabbits foraging together on the living room braided jute rug"
     }
+
+def ensure_warm_bgm(bgm_path: str):
+    """Synthesizes a warm, subtle lo-fi chord bed so there is zero dead air behind speech."""
+    if os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 1000:
+        return
+    os.makedirs(os.path.dirname(bgm_path), exist_ok=True)
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", "aevalsrc='0.04*sin(2*PI*220*t)+0.03*sin(2*PI*277.18*t)+0.03*sin(2*PI*329.63*t)':s=44100:d=25",
+        "-af", "lowpass=f=800,afade=t=in:ss=0:d=1",
+        "-c:a", "libmp3lame", "-b:a", "128k", bgm_path
+    ], check=True)
 
 def format_ass_time(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -193,7 +222,7 @@ def format_ass_time(seconds: float) -> str:
         cs = 0
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-async def generate_voice_and_captions(raw_script: str, voice_name: str, audio_path: str, ass_path: str):
+async def generate_voice_and_captions(raw_script: str, hook_banner: str, voice_name: str, audio_path: str, ass_path: str):
     clean_spoken = re.sub(r"\[.*?\]", "", raw_script).strip()
     words = []
     try:
@@ -216,23 +245,34 @@ async def generate_voice_and_captions(raw_script: str, voice_name: str, audio_pa
         ], check=True)
 
     ass_lines = [
-        "[Script Info]", "ScriptType: v4.00+", "PlayResX: 720", "PlayResY: 1280", "",
+        "[Script Info]", "ScriptType: v4.00+", "PlayResX: 720", "PlayResY: 1280", "WrapStyle: 1", "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: TikTok,DejaVu Sans,56,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,5,3,2,40,40,280,1",
+        # Lower-third dynamic word-pop style
+        "Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,3,2,50,50,270,1",
+        # Top Hook Pill Banner style (BorderStyle=3 draws an opaque rounded box)
+        "Style: HookBanner,DejaVu Sans,40,&H0000FFFF,&H0000FFFF,&H001E293B,&H001E293B,-1,0,0,0,100,100,1,0,3,14,0,8,40,40,130,1",
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
     ]
-    for i in range(0, len(words), 3):
-        grp = words[i : i + 3]
+
+    # Add Top Hook Banner for the first 3.2 seconds
+    clean_hook = hook_banner.replace("{", "").replace("}", "").upper()[:32]
+    ass_lines.append(f"Dialogue: 1,0:00:00.00,0:00:03.20,HookBanner,,0,0,0,,🐾 {clean_hook}")
+
+    # Smart 2-word grouping so long words never clip off-screen when scaled to 115%
+    idx = 0
+    while idx < len(words):
+        grp = words[idx : idx + 2] if sum(len(w["text"]) for w in words[idx : idx + 3]) > 14 else words[idx : idx + 3]
+        idx += len(grp)
         for active_idx, target in enumerate(grp):
             t_start = target["start"]
             t_end = grp[active_idx + 1]["start"] if active_idx + 1 < len(grp) else target["end"] + 0.15
             tokens = [
-                f"{{\\c&H00FFFF&\\fscx115\\fscy115}}{w['text']}{{\\c&HFFFFFF&\\fscx100\\fscy100}}"
-                if idx == active_idx else w["text"]
-                for idx, w in enumerate(grp)
+                f"{{\\c&H00FFFF&\\fscx100\\fscy100\\t(0,70,\\fscx116\\fscy116)}}{w['text']}{{\\c&HFFFFFF&\\fscx100\\fscy100}}"
+                if j == active_idx else w["text"]
+                for j, w in enumerate(grp)
             ]
             ass_lines.append(f"Dialogue: 0,{format_ass_time(t_start)},{format_ass_time(t_end)},TikTok,,0,0,0,,{' '.join(tokens)}")
 
@@ -240,25 +280,20 @@ async def generate_voice_and_captions(raw_script: str, voice_name: str, audio_pa
         f.write("\n".join(ass_lines))
 
 def fetch_valid_image(prompt: str, seed: int, out_path: str):
-    """
-    1. Tries Hugging Face FLUX.1-schnell API using HF_TOKEN.
-    2. Tries Pollinations Flux with browser User-Agent.
-    3. Falls back to styled FFmpeg slate if both are rate-limited.
-    """
+    """Requests native 9:16 (768x1344) vertical aspect ratio from HF FLUX.1-schnell."""
     hf_token = os.environ.get("HF_TOKEN", "").strip()
     if hf_token:
         try:
             hf_url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
-            r = requests.post(
-                hf_url,
-                headers={"Authorization": f"Bearer {hf_token}"},
-                json={"inputs": f"{prompt}, vertical 9:16 smartphone photography, photorealistic"},
-                timeout=35
-            )
+            payload = {
+                "inputs": f"{prompt}, vertical 9:16 iPhone 15 UGC footage, natural indoor daylight, sharp focus",
+                "parameters": {"width": 768, "height": 1344, "num_inference_steps": 4, "seed": seed}
+            }
+            r = requests.post(hf_url, headers={"Authorization": f"Bearer {hf_token}"}, json=payload, timeout=40)
             if r.status_code == 200 and (r.content.startswith(b"\xff\xd8") or r.content.startswith(b"\x89PNG")):
                 with open(out_path, "wb") as f:
                     f.write(r.content)
-                print(f"✅ Generated image via HF FLUX.1-schnell: {out_path}")
+                print(f"✅ Native 9:16 image via HF FLUX.1-schnell: {out_path}")
                 return
         except Exception as e:
             print(f"⚠️ HF FLUX.1-schnell skipped: {e}")
@@ -270,10 +305,9 @@ def fetch_valid_image(prompt: str, seed: int, out_path: str):
         if resp.status_code == 200 and (resp.content.startswith(b"\xff\xd8") or resp.content.startswith(b"\x89PNG")):
             with open(out_path, "wb") as f:
                 f.write(resp.content)
-            print(f"✅ Generated image via Pollinations Flux: {out_path}")
             return
-    except Exception as e:
-        print(f"⚠️ Pollinations fallback triggered: {e}")
+    except Exception:
+        pass
 
     subprocess.run([
         "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x1e293b:s=720x1280:d=1",
@@ -286,19 +320,25 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
 
     audio_path = f"output/{c_key}.mp3"
     ass_path = f"output/{c_key}.ass"
+    bgm_path = "output/bgm_warm.mp3"
     b1_img = f"{MEDIA_DIR}/{c_key}_beat1.jpg"
     b2_img = f"{MEDIA_DIR}/{c_key}_beat2.jpg"
+    b3_img = f"{MEDIA_DIR}/{c_key}_beat3.jpg"
     final_mp4 = f"{MEDIA_DIR}/{c_key}_latest.mp4"
+
+    ensure_warm_bgm(bgm_path)
 
     human = c_data.get("human", {})
     locs = c_data.get("locations", {})
     voice = human.get("edge_voice", "en-GB-SoniaNeural")
     face_dna = human.get("immutable_face_dna", "26yo British woman Maya")
+    outfit = human.get("wardrobe_rotation", ["sage cardigan"])[0]
     pet0 = chosen_pets[0]
-    pet_dna = pet0.get("immutable_marking_dna", "cream Holland Lop rabbit")
-    morph = age_data[pet0["id"]]["morphology"]
+    pet1 = chosen_pets[1] if len(chosen_pets) > 1 else chosen_pets[0]
 
-    asyncio.run(generate_voice_and_captions(script_data["script"], voice, audio_path, ass_path))
+    asyncio.run(generate_voice_and_captions(
+        script_data["script"], script_data["hook_text"], voice, audio_path, ass_path
+    ))
 
     try:
         duration = float(subprocess.check_output([
@@ -306,31 +346,64 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
             "-of", "default=noprint_wrappers=1:nokey=1", audio_path
         ]).strip())
     except Exception:
-        duration = 8.0
+        duration = 9.0
 
-    prompt_b1 = f"{locs.get('SET_A_SOFA', '')}, vertical iPhone selfie of {face_dna}, gentle warm smile, {pet_dna} visible in background"
-    prompt_b2 = f"{locs.get('SET_C_RUG_POV', '')}, high-angle POV looking down at {pet_dna} ({morph}), {script_data.get('beat2_action', 'exploring rug')}, zero human hands"
+    # 3 Distinct Visual Beats with Depth-of-Field Separation
+    prompt_b1 = (
+        f"{locs.get('SET_A_SOFA', '')}, vertical smartphone selfie of {face_dna}, wearing {outfit}, "
+        f"{human['expressions']['SMILE_WARM']}, {pet0['immutable_marking_dna']} visible on rug in background"
+    )
+    prompt_b2 = (
+        f"{locs.get('SET_C_RUG_POV', '')}, high-angle first-person POV looking down at {pet0['immutable_marking_dna']} "
+        f"and {pet1['immutable_marking_dna']}, {script_data.get('beat2_action', 'exploring rug')}, zero human hands"
+    )
+    prompt_b3 = (
+        f"{locs.get('SET_B_KITCHEN', '')}, medium portrait shot of {face_dna}, wearing {outfit}, "
+        f"{human['expressions']['SMILE_LAUGH']}, holding a sprig of fresh green basil, {pet1['immutable_marking_dna']} on counter"
+    )
 
     fetch_valid_image(prompt_b1, c_data.get("master_seed", 884102), b1_img)
     fetch_valid_image(prompt_b2, pet0.get("pet_seed", 420881), b2_img)
+    fetch_valid_image(prompt_b3, c_data.get("master_seed", 884102) + 7, b3_img)
 
-    half = max(2.5, round(duration / 2.0, 2))
+    # Proportional 3-Beat Timing + Smooth Handheld Zoom/Pan + Crossfades + Sidechain Audio Ducking
+    seg = max(2.2, round((duration + 0.6) / 3.0, 2))
+    frames = int(seg * 30)
+    xf1 = round(seg - 0.25, 2)
+    xf2 = round((seg * 2) - 0.50, 2)
+
+    filter_complex = (
+        f"[0:v]scale=820:1458:force_original_aspect_ratio=increase,crop=820:1458,"
+        f"zoompan=z='min(zoom+0.0012,1.14)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280:fps=30,setsar=1[v0];"
+        f"[1:v]scale=820:1458:force_original_aspect_ratio=increase,crop=820:1458,"
+        f"zoompan=z='if(eq(on,1),1.14,max(1.0,zoom-0.0012))':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280:fps=30,setsar=1[v1];"
+        f"[2:v]scale=820:1458:force_original_aspect_ratio=increase,crop=820:1458,"
+        f"zoompan=z='min(zoom+0.0010,1.12)':d={frames+15}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280:fps=30,setsar=1[v2];"
+        f"[v0][v1]xfade=transition=fade:duration=0.25:offset={xf1}[vx1];"
+        f"[vx1][v2]xfade=transition=fade:duration=0.25:offset={xf2},ass={ass_path}[vout];"
+        f"[3:a]asplit=2[vo][vo_sc];"
+        f"[4:a]volume=0.22[bg];"
+        f"[bg][vo_sc]sidechaincompress=threshold=0.015:ratio=5:attack=40:release=250[bg_ducked];"
+        f"[vo][bg_ducked]amix=inputs=2:duration=first[aout]"
+    )
+
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1", "-t", str(half), "-i", b1_img,
-        "-loop", "1", "-t", str(half + 0.5), "-i", b2_img,
+        "-i", b1_img,
+        "-i", b2_img,
+        "-i", b3_img,
         "-i", audio_path,
-        "-filter_complex",
-        f"[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1[v0];"
-        f"[1:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1[v1];"
-        f"[v0][v1]concat=n=2:v=1:a=0,ass={ass_path}[vout]",
-        "-map", "[vout]", "-map", "2:a",
+        "-i", bgm_path,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
         "-c:a", "aac", "-b:a", "128k",
+        "-metadata", "com.apple.quicktime.make=Apple",
+        "-metadata", "com.apple.quicktime.model=iPhone 15 Pro",
         "-shortest", final_mp4
     ]
     subprocess.run(cmd, check=True)
-    return {"mp4": final_mp4, "b1": b1_img, "b2": b2_img}
+    return {"mp4": final_mp4, "b1": b1_img, "b2": b2_img, "b3": b3_img}
 
 def build_all_storefronts_and_grounding(latest_draft: dict = None):
     bible = ensure_json_file(STATE_BIBLE, DEFAULT_BIBLE, required_subkey="bio_slug")
@@ -343,7 +416,7 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
     with open(os.path.join(DOCS_DIR, ".nojekyll"), "w") as f:
         f.write("")
 
-    # Build the inline /watch/ HTML5 video player page
+    cache_bust = int(time.time())
     hook_title = latest_draft["hook_text"] if latest_draft else "Maya & The Buns — Latest Reel"
     script_txt = latest_draft["script"] if latest_draft else "Latest generated draft."
     watch_html = f"""<!DOCTYPE html>
@@ -351,9 +424,9 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
     <title>Watch Daily Draft</title></head>
     <body style='background:#0f172a;color:#f8fafc;font-family:sans-serif;padding:20px;max-width:480px;margin:auto;text-align:center;'>
       <h2 style='color:#f59e0b;margin-bottom:8px;'>🎬 {hook_title}</h2>
-      <video controls autoplay playsinline style='width:100%;max-width:360px;border-radius:16px;border:2px solid #334155;background:#000;' src='../media/rabbit_channel_latest.mp4'></video>
+      <video controls autoplay playsinline style='width:100%;max-width:360px;border-radius:16px;border:2px solid #334155;background:#000;' src='../media/rabbit_channel_latest.mp4?v={cache_bust}'></video>
       <p style='background:#1e293b;padding:14px;border-radius:10px;font-size:14px;line-height:1.5;margin-top:16px;'>"{script_txt}"</p>
-      <p style='margin-top:16px;'><a href='../media/rabbit_channel_latest.mp4' download style='color:#38bdf8;font-weight:700;'>📥 Download Raw MP4 File</a> | <a href='../grounding/' style='color:#f59e0b;'>🛡️ Grounding Bible</a></p>
+      <p style='margin-top:16px;'><a href='../media/rabbit_channel_latest.mp4?v={cache_bust}' download style='color:#38bdf8;font-weight:700;'>📥 Download Raw MP4</a> | <a href='../grounding/' style='color:#f59e0b;'>🛡️ Grounding Bible</a></p>
     </body></html>"""
     with open(os.path.join(DOCS_DIR, "watch", "index.html"), "w", encoding="utf-8") as f:
         f.write(watch_html)
@@ -377,9 +450,10 @@ def build_all_storefronts_and_grounding(latest_draft: dict = None):
         grounding_cards.append(
             f"<div style='background:#1e293b;padding:20px;border-radius:12px;margin-bottom:20px;'>"
             f"<h2>{c_name} ({c_handle})</h2>"
-            f"<div style='display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;'>"
-            f"<img src='../media/{c_key}_beat1.jpg' style='width:180px;border-radius:10px;border:1px solid #475569;' alt='Human Creator Scene'>"
-            f"<img src='../media/{c_key}_beat2.jpg' style='width:180px;border-radius:10px;border:1px solid #475569;' alt='Pet POV Scene'>"
+            f"<div style='display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;'>"
+            f"<img src='../media/{c_key}_beat1.jpg?v={cache_bust}' style='width:150px;border-radius:10px;border:1px solid #475569;' alt='Beat 1'>"
+            f"<img src='../media/{c_key}_beat2.jpg?v={cache_bust}' style='width:150px;border-radius:10px;border:1px solid #475569;' alt='Beat 2'>"
+            f"<img src='../media/{c_key}_beat3.jpg?v={cache_bust}' style='width:150px;border-radius:10px;border:1px solid #475569;' alt='Beat 3'>"
             f"</div>"
             f"<p><strong>Human Creator:</strong> {h.get('name','Maya')} ({h.get('age',26)}yo)<br><small>{h.get('immutable_face_dna', '')}</small></p>"
             f"<h3>Active Pets</h3>{pets_html}<h3>Locked Apartment Locations</h3><ul>{locs_html}</ul></div>"
@@ -449,6 +523,7 @@ def main():
         raw_mp4_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_latest.mp4"
         raw_b1_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_beat1.jpg"
         raw_b2_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_beat2.jpg"
+        raw_b3_url = f"https://raw.githubusercontent.com/{repo}/main/docs/media/{c_key}_beat3.jpg"
 
         c_name = c_data.get("channel_name", "Maya & The Buns")
         latest_draft = {
@@ -465,15 +540,15 @@ def main():
         token = os.environ.get("GITHUB_TOKEN")
         if token:
             issue_body = (
-                f"### 🎬 Daily Draft Ready: {c_name}\n\n"
+                f"### 🎬 3-Beat Daily Draft Ready: {c_name}\n\n"
                 f"- **▶️ Watch in Browser Player:** [{pages_watch_url}]({pages_watch_url})\n"
                 f"- **📥 Direct Raw MP4 Stream:** [Click to open/download MP4]({raw_mp4_url})\n\n"
-                f"**Spoken Script (with yellow/white burned-in captions):**\n"
-                f"> {latest_draft['script']}\n\n"
-                f"### 📸 Generated Scene Frames\n"
-                f"| Beat 1 (Maya + Pet in Flat) | Beat 2 (Pet POV Action) |\n"
-                f"| :--- | :--- |\n"
-                f"| ![Beat 1]({raw_b1_url}) | ![Beat 2]({raw_b2_url}) |\n\n"
+                f"**Top Hook Pill:** `{latest_draft['hook_text']}`\n"
+                f"**Spoken Script:**\n> {latest_draft['script']}\n\n"
+                f"### 📸 3-Beat Native 9:16 Storyboard\n"
+                f"| Beat 1 (Hook Selfie) | Beat 2 (Pet POV Rug) | Beat 3 (Payoff & Loop) |\n"
+                f"| :--- | :--- | :--- |\n"
+                f"| ![Beat 1]({raw_b1_url}) | ![Beat 2]({raw_b2_url}) | ![Beat 3]({raw_b3_url}) |\n\n"
                 f"---\n"
                 f"**Mobile Actions:** Apply label `approve` or comment `/publish`."
             )
@@ -486,7 +561,7 @@ def main():
     build_all_storefronts_and_grounding(latest_draft)
     with open(STATE_QUEUE, "w", encoding="utf-8") as f:
         json.dump(queue, f, indent=2)
-    print("✅ Complete! Video and images saved to docs/media/ and linked in Issue.")
+    print("✅ Complete! 3-beat video with zoompan, crossfades, hook banner, and ducked BGM rendered.")
 
 if __name__ == "__main__":
     main()
