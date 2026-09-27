@@ -19,11 +19,11 @@ except Exception:
 
 from src.openrouter_media import (
     MediaGenerationError,
-    VOICE_REFERENCE_TRANSCRIPT,
     generate_beat_image,
     synthesize_speech,
     validate_image,
 )
+from src.motion import MOTION_THRESHOLD, MotionError, generate_i2v_clip, measure_motion
 
 try:
     from gradio_client import Client, handle_file
@@ -511,59 +511,44 @@ def generate_maya_scene_with_pulid(master_face_path: str, prompt: str, seed: int
         reference_path=master_face_path,
     )
 
-def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, out_mp4: str, pan_dir: int = 1):
+def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, out_mp4: str, pan_dir: int = 1) -> str:
     """
-    1. Tries Hugging Face LTX-Video ZeroGPU to animate the image into real video + boomerang loops it.
-    2. If HF queue is busy, uses a 4K-upscaled sub-pixel floating-point crop (ZERO zoompan integer jitter!).
+    Turn a beat still into a genuinely moving clip.
+
+    Returns the provider that actually animated it, or "still-pan" when every
+    image-to-video provider failed. The caller is expected to surface that, so
+    a run where the characters stayed dead is never presented as a success.
     """
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
     raw_ai = f"{out_mp4}.raw_ai.mp4"
-    ai_ok = False
+    prompt = f"{motion_prompt}, subtle natural movement, handheld smartphone video, photorealistic"
 
-    if HAS_GRADIO:
-        try:
-            print(f"🎬 Requesting LTX-Video AI motion for {os.path.basename(img_path)}...")
-            client = Client("Lightricks/ltx-video-distilled", hf_token=hf_token or None)
-            job = client.submit(
-                prompt=f"{motion_prompt}, subtle natural movement, handheld smartphone video, photorealistic",
-                input_image_filepath=handle_file(img_path),
-                height_ui=768,
-                width_ui=512,
-                mode="image-to-video",
-                duration_ui=4.0,
-                ui_frames_to_use=9,
-                seed_ui=42,
-                randomize_seed=True,
-                ui_guidance_scale=3.0,
-                improve_texture_flag=True,
-                api_name="/image_to_video"
-            )
-            res = job.result(timeout=95)
-            v_file = res["video"] if isinstance(res, dict) and "video" in res else (
-                res[0]["video"] if isinstance(res, (list, tuple)) and isinstance(res[0], dict) else (
-                    res[0] if isinstance(res, (list, tuple)) else res
-                )
-            )
-            if v_file and os.path.exists(str(v_file)):
-                shutil.copy(str(v_file), raw_ai)
-                ai_ok = True
-                print(f"✅ LTX-Video motion succeeded for {os.path.basename(img_path)}!")
-        except Exception as e:
-            print(f"ℹ️ LTX-Video queue full/timeout ({e}), using jitter-free 4K sub-pixel camera drift.")
+    try:
+        clip, provider = generate_i2v_clip(img_path, prompt, raw_ai, duration_sec)
+    except MotionError as exc:
+        print(f"DEGRADED {os.path.basename(img_path)}: no live motion, using camera drift")
+        print(f"  {str(exc)[:400]}")
+        _camera_drift(img_path, duration_sec, out_mp4, pan_dir)
+        return "still-pan"
 
-    if ai_ok and os.path.exists(raw_ai):
-        # Boomerang loop the AI clip to match exact beat duration
-        subprocess.run([
-            "ffmpeg", "-y", "-i", raw_ai,
-            "-filter_complex",
-            f"[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30,split[fwd][tmp];"
-            f"[tmp]reverse[rev];[fwd][rev]concat=n=2:v=1:a=0,loop=loop=-1:size=300:start=0,trim=duration={duration_sec},setpts=PTS-STARTPTS[vout]",
-            "-map", "[vout]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", out_mp4
-        ], check=True)
-        return
+    # Generators emit a few seconds; cover the whole beat with a forward+reverse
+    # loop so the beat never visibly restarts mid-shot.
+    subprocess.run([
+        "ffmpeg", "-y", "-v", "error", "-stream_loop", "-1", "-i", clip,
+        "-filter_complex",
+        f"[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30,split[fwd][tmp];"
+        f"[tmp]reverse[rev];[fwd][rev]concat=n=2:v=1:a=0,trim=duration={duration_sec},setpts=PTS-STARTPTS[vout]",
+        "-map", "[vout]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", out_mp4
+    ], check=True)
+    return provider
 
-    # JITTER-FREE 4K SUB-PIXEL CAMERA DRIFT (Replaces choppy zoompan)
-    # Upscales to 1584x2816 and uses smooth time-based crop expressions at 30fps
+
+def _camera_drift(img_path: str, duration_sec: float, out_mp4: str, pan_dir: int):
+    """Last-resort motion: pan across the still.
+
+    This is NOT a character coming alive - measured motion is ~1.8 against a
+    4.0 threshold for real animation. It exists so a provider outage degrades
+    the reel instead of failing it, and it is always reported as degraded.
+    """
     if pan_dir == 1:
         x_expr = "(iw-ow)/2 + ((iw-ow)/3)*sin(t*0.45)"
         y_expr = "(ih-oh)*0.25 + ((ih-oh)*0.35)*(t/" + str(max(1.0, duration_sec)) + ")"
@@ -572,7 +557,7 @@ def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, 
         y_expr = "(ih-oh)*0.65 - ((ih-oh)*0.35)*(t/" + str(max(1.0, duration_sec)) + ")"
 
     subprocess.run([
-        "ffmpeg", "-y", "-loop", "1", "-t", str(duration_sec), "-r", "30", "-i", img_path,
+        "ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", str(duration_sec), "-r", "30", "-i", img_path,
         "-vf", (
             f"scale=1584:2816:force_original_aspect_ratio=increase,crop=1584:2816,"
             f"crop=w=1360:h=2418:x='{x_expr}':y='{y_expr}',"
@@ -651,9 +636,17 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
     seg2_mp4 = f"output/{c_key}_seg2.mp4"
     seg3_mp4 = f"output/{c_key}_seg3.mp4"
 
-    animate_beat_to_mp4(b1_img, "young woman smiling and reacting naturally on camera", d1, seg1_mp4, pan_dir=1)
-    animate_beat_to_mp4(b2_img, f"{pet0['breed']} twitching nose and moving ears on rug", d2, seg2_mp4, pan_dir=-1)
-    animate_beat_to_mp4(b3_img, f"{pet1['breed']} looking up curiously at camera", d3, seg3_mp4, pan_dir=1)
+    anim_b1 = animate_beat_to_mp4(b1_img, "young woman smiling and reacting naturally on camera", d1, seg1_mp4, pan_dir=1)
+    anim_b2 = animate_beat_to_mp4(b2_img, f"{pet0['breed']} twitching nose and moving ears on rug", d2, seg2_mp4, pan_dir=-1)
+    anim_b3 = animate_beat_to_mp4(b3_img, f"{pet1['breed']} looking up curiously at camera", d3, seg3_mp4, pan_dir=1)
+    animators = {"beat1": anim_b1, "beat2": anim_b2, "beat3": anim_b3}
+    live_beats = [b for b, p in animators.items() if p != "still-pan"]
+    if not live_beats:
+        raise MediaGenerationError(
+            "no beat could be animated - every image-to-video provider failed; "
+            "refusing to publish a motionless reel"
+        )
+    print(f"  [motion] live beats: {', '.join(live_beats)}")
 
     # 6. Stitch with Crossfades, Burn ASCII .ass Captions, and Normalize Speech Audio (NO Sine Drone!)
     xf1 = round(d1 - 0.20, 2)
@@ -677,7 +670,20 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         "-shortest", final_mp4
     ]
     subprocess.run(cmd, check=True)
-    return {"mp4": final_mp4, "b1": b1_img, "b2": b2_img, "b3": b3_img}
+
+    # Measure what we actually shipped rather than trusting the pipeline.
+    final_motion = measure_motion(final_mp4)
+    print(f"  [motion] final reel motion score: {final_motion:.2f} (live >= {MOTION_THRESHOLD})")
+
+    return {
+        "mp4": final_mp4,
+        "b1": b1_img,
+        "b2": b2_img,
+        "b3": b3_img,
+        "animators": animators,
+        "live_beats": live_beats,
+        "motion_score": final_motion,
+    }
 
 # =====================================================================
 # 4. STOREFRONT, GROUNDING DASHBOARD, & MAIN RUNNER
@@ -798,7 +804,7 @@ def main():
 
         script_data = write_daily_script(c_data, pets[:2], age_summary, trends[0])
         try:
-            render_video(c_key, c_data, pets[:2], age_data, script_data)
+            render_result = render_video(c_key, c_data, pets[:2], age_data, script_data)
         except MediaGenerationError as e:
             # Do not queue a draft, do not open an issue, and above all do not
             # leave a half-rendered MP4 sitting in docs/media where the watch
@@ -821,17 +827,33 @@ def main():
             "script": script_data["script"],
             "video_url": raw_mp4_url,
             "watch_url": pages_watch_url,
+            "live_beats": render_result.get("live_beats", []),
+            "motion_score": render_result.get("motion_score", 0.0),
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         queue.setdefault("pending_approvals", []).append(latest_draft)
 
         token = os.environ.get("GITHUB_TOKEN")
         if token:
+            live = render_result.get("live_beats", [])
+            dead = [b for b in ("beat1", "beat2", "beat3") if b not in live]
+            animators = render_result.get("animators", {})
+            how = ", ".join(f"{b}={p}" for b, p in animators.items())
+            motion_line = (
+                f"**Character motion:** {len(live)}/3 beats genuinely animated - "
+                f"measured motion score `{render_result.get('motion_score', 0.0):.1f}` "
+                f"(live threshold `{MOTION_THRESHOLD}`)\n"
+                f"**Per beat:** `{how}`\n"
+                + (f"**Degraded:** {', '.join(dead)} fell back to still-camera-pan "
+                   f"(NOT live motion)\n" if dead else "")
+                + "\n"
+            )
             issue_body = (
                 f"### 🎬 POV + Reaction Cutaway Draft Ready: {c_name}\n\n"
                 f"- **▶️ Watch in Browser Player:** [{pages_watch_url}]({pages_watch_url})\n"
                 f"- **📥 Direct Raw MP4 Stream:** [Click to open/download MP4]({raw_mp4_url})\n\n"
                 f"**Top Hook Banner:** `{latest_draft['hook_text']}`\n"
+                f"{motion_line}"
                 f"**Spoken Script:**\n> {latest_draft['script']}\n\n"
                 f"### 📸 Face-Locked Maya + Solo-Pet POV Cutaways\n"
                 f"| Beat 1 (Face-Locked Maya) | Beat 2 ({pets[0]['name']} Solo POV) | Beat 3 ({pets[1]['name']} Solo POV) |\n"
