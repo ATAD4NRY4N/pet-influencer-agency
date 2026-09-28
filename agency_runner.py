@@ -96,10 +96,15 @@ DEFAULT_BIBLE = {
 NO_HUMAN_TERMS = (
     "human", "humans", "person", "persons", "people", "woman", "women",
     "man", "men", "girl", "girls", "boy", "boys", "lady", "ladies",
-    "gentleman", "owner", "owners", "maya", "face dna", "portrait of",
+    "gentleman", "owner", "owners", "maya", "face dna",
     "hand", "hands", "arm", "arms", "finger", "fingers", "child", "children",
     "crowd", "family", "kid", "kids", "selfie", "vlogger", "creator",
 )
+# "portrait of" was briefly in that list and had to come out: the master
+# reference prompt legitimately reads "studio-style reference portrait of one
+# single cream-white Holland Lop rabbit", and the guard rejected the channel's
+# own animals-only prompt. A human portrait is already caught by the noun
+# beside it, so the phrase added nothing and cost us a false positive.
 
 # Terms match only on word boundaries, and specifically NOT after a hyphen or
 # another word character. A plain substring search is useless here, and so is a
@@ -339,9 +344,47 @@ def format_ass_time(seconds: float) -> str:
 #    The cast is entirely animals, so there is no face lock to keep. What holds
 #    a character steady instead is the pet's own marking DNA plus its fixed seed.
 # =====================================================================
-def fetch_flux_image(prompt: str, seed: int, out_path: str):
+def fetch_flux_image(prompt: str, seed: int, out_path: str, reference_path: str = None):
     """Render one beat through the validated provider ladder. Raises on failure."""
-    return generate_beat_image(prompt, seed, out_path)
+    return generate_beat_image(prompt, seed, out_path, reference_path=reference_path)
+
+
+def ensure_pet_master_reference(pet: dict, loc: str) -> str | None:
+    """One canonical portrait per animal, created once and reused forever.
+
+    This is what actually holds a character together. The marking DNA in the
+    bible tells the model what Barnaby looks like, but a text description
+    re-rolls the face every episode - Barnaby's charcoal-grey left ear came back
+    a different shade of grey on almost every run. Passing a real photograph of
+    the animal as an input reference is the only mechanism in this pipeline that
+    survives from episode to episode, and OpenRouter's images catalogue shows
+    five of our rungs accept one (seedream, gemini31, flux_pro, gemini_lite,
+    gemini).
+
+    Returns None rather than raising: a missing reference degrades the beat to a
+    plain text-to-image render, which is worse but not fatal, and the run should
+    not die because one portrait could not be drawn.
+    """
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    master = f"{MEDIA_DIR}/{pet['id']}_master.jpg"
+    if os.path.exists(master) and os.path.getsize(master) > 20_000:
+        return master
+
+    prompt = (
+        f"{loc}, studio-style reference portrait of {pet['immutable_marking_dna']}, "
+        f"centred, full body and face clearly visible, even soft daylight, "
+        f"plain uncluttered background, photorealistic, animals only, "
+        f"no person, no hands"
+    )
+    assert_animal_only(prompt, f"{pet['name']} master reference")
+    try:
+        generate_beat_image(prompt, pet.get("pet_seed", 420000), master)
+        print(f"  [cast] created master reference for {pet['name']} -> {os.path.basename(master)}")
+        return master
+    except Exception as exc:
+        print(f"  [cast] WARNING: no master reference for {pet['name']} ({str(exc)[:120]})")
+        print(f"  [cast]          {pet['name']} will drift between episodes this run")
+        return None
 
 
 def animate_beat_to_mp4(img_path: str, motion_prompt: str, duration_sec: float, out_mp4: str, pan_dir: int = 1) -> str:
@@ -426,11 +469,18 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
     beat_imgs = [b1_img, b2_img, b3_img]
 
     # 1. One animal-only still per beat, each anchored to a locked pet so the
-    #    same rabbit comes back in the next episode looking like itself.
+    #    same rabbit comes back in the next episode looking like itself. The
+    #    anchor is that animal's own master portrait, not just its description.
+    masters: dict = {}
     for i, beat in enumerate(beats):
         pet = by_id[beat["pet_id"]]
         morph = age_data[pet["id"]]["morphology"]
         loc = locs.get(loc_keys[i % len(loc_keys)], "")
+        if pet["id"] not in masters:
+            masters[pet["id"]] = ensure_pet_master_reference(
+                pet, locs.get("SET_LIVING", loc)
+            )
+        ref = masters[pet["id"]]
         prompt = (
             f"{loc}, candid vertical iPhone photo of {pet['immutable_marking_dna']} "
             f"({morph}), {beat.get('action', 'sitting calmly on the floor')}, "
@@ -439,8 +489,9 @@ def render_video(c_key: str, c_data: dict, chosen_pets: list[dict], age_data: di
         )
         assert_animal_only(prompt, f"beat{i + 1} image")
         seed = pet.get("pet_seed", 420000) + i * 7
-        fetch_flux_image(prompt, seed, beat_imgs[i])
-        print(f"  [cast] beat{i + 1}: {pet['name']} ({pet['breed']}) seed {seed}")
+        fetch_flux_image(prompt, seed, beat_imgs[i], reference_path=ref)
+        print(f"  [cast] beat{i + 1}: {pet['name']} ({pet['breed']}) seed {seed}"
+              f"{' ref=locked' if ref else ' ref=none'}")
 
     # Final gate before anything reaches ffmpeg. Beat 3 of the run in issue #6
     # was a flat colour card here, and it became 4.6s of black screen in the

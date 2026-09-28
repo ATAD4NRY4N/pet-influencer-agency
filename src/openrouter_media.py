@@ -58,10 +58,42 @@ ASPECT_TOLERANCE = 0.14
 # rung the current billing policy refuses, so under the default free-only
 # policy this collapses to pollinations regardless of the order.
 IMAGE_LADDER = {
+    "seedream": "bytedance-seed/seedream-5-0-lite",
+    "gemini31": "google/gemini-3.1-flash-image",
+    "flux_pro": "black-forest-labs/flux.2-pro",
+    "gemini_lite": "google/gemini-3.1-flash-lite-image",
     "gemini": "google/gemini-2.5-flash-image",
+    # Design-tooling models, kept reachable but never preferred. Neither can
+    # hold a character: ming-image-0.1-design-layer is image-to-image and
+    # *splits a flattened design into RGBA layers* (it needs an input image we
+    # do not have), and ming-image-0.1-design accepts zero reference images
+    # (`input_references: 0-0`), so it cannot possibly keep Barnaby's ear the
+    # same grey across episodes. Verified against OpenRouter's images
+    # catalogue at /api/v1/images/models, which is a different list from the
+    # chat catalogue at /api/v1/models.
+    "ming": "inclusionai/ming-image-0.1-design",
+    "ming_layer": "inclusionai/ming-image-0.1-design-layer",
     "pollinations": "pollinations/flux",
 }
-DEFAULT_IMAGE_ORDER = "gemini,pollinations"
+
+# Reference-image support, from the same catalogue. `refs` is the advertised
+# input_references range; the number that matters for character consistency is
+# the minimum, because a model that refuses a reference cannot be given one.
+#   seedream 0-14 | gemini31 0-14 | flux_pro 0-8 | gemini_lite 0-14
+#   gemini 0-3    | ming 0-0 (useless) | ming_layer 1-1 (needs a design file)
+REFERENCE_CAPABLE = {"seedream", "gemini31", "flux_pro", "gemini_lite", "gemini"}
+
+# Resolution is not uniform across the ladder - seedream offers 2K/4K, gemini31
+# offers up to 4K, flux_pro and gemini advertise none - so it is sent only when
+# the operator asks for it, and the payload walk below drops it automatically
+# for any model that rejects it rather than failing the beat.
+DEFAULT_IMAGE_RESOLUTION = os.environ.get("IMAGE_RESOLUTION", "2K")
+
+# The 2K/4K reference-capable models lead because the whole point of moving off
+# Pollinations is image quality. `gemini` is the only rung confirmed end to end
+# by a real run, so it stays in the chain as a known-good fallback, and
+# pollinations is last so a run can still finish at zero cost.
+DEFAULT_IMAGE_ORDER = "seedream,gemini31,flux_pro,gemini_lite,gemini,pollinations"
 
 # Ordered TTS ladder. Fish is first because it is the only rung that supports
 # stateless voice cloning, which is what keeps one recognisable voice across the
@@ -176,33 +208,45 @@ def _write_data_url_image(reference_path: str) -> str:
 # --------------------------------------------------------------------------
 # images
 # --------------------------------------------------------------------------
-def _generate_via_openrouter(prompt: str, seed: int, out_path: str, reference_path: str | None) -> None:
-    ladder_order = os.environ.get("IMAGE_PROVIDER_ORDER", DEFAULT_IMAGE_ORDER)
-    allowed = billing.filter_ladder(
-        [k.strip() for k in ladder_order.split(",") if k.strip()], IMAGE_LADDER, "image"
-    )
-    if not allowed:
-        raise MediaGenerationError(
-            f"no free OpenRouter image model is permitted "
-            f"(IMAGE_PROVIDER_ORDER={ladder_order!r}, free_only={billing.free_only()})"
-        )
-    model = allowed[0][1]
+def _accepts_references(model: str) -> bool:
+    """True when this rung can actually be given a reference image."""
+    return model in {IMAGE_LADDER[k] for k in REFERENCE_CAPABLE if k in IMAGE_LADDER}
 
+
+def _generate_via_openrouter(prompt: str, seed: int, out_path: str, reference_path: str | None, model: str) -> None:
+    """Render one beat through OpenRouter's Images API using `model`.
+
+    The model is passed in by the caller, which has already run it through
+    billing.filter_ladder. This function used to re-derive the choice itself
+    with `allowed[0][1]`, which silently pinned every attempt to the first
+    permitted rung no matter which rung the caller's loop was on - so with a
+    multi-model order, rung 2 and beyond were unreachable. The first model to
+    fail took the whole episode with it instead of falling through to the next.
+    """
     base = {"model": model, "prompt": prompt}
+    if DEFAULT_IMAGE_RESOLUTION:
+        base = {**base, "resolution": DEFAULT_IMAGE_RESOLUTION}
 
-    # Not every image model advertises aspect_ratio or n in supported_parameters,
-    # and OpenRouter rejects an unsupported combination with a 400 rather than
-    # quietly ignoring it. So we walk a ladder of progressively plainer payloads
-    # and keep the first one the model actually accepts, rather than assuming.
+    # Not every image model advertises aspect_ratio, resolution or n in
+    # supported_parameters, and OpenRouter rejects an unsupported combination
+    # with a 400 rather than quietly ignoring it. So we walk a ladder of
+    # progressively plainer payloads and keep the first one the model actually
+    # accepts, rather than assuming.
     #
     # The reference portrait is the first thing to go: it is the biggest quality
     # win, but a model that cannot take references should still render the beat.
     candidates = []
-    if reference_path and os.path.exists(reference_path):
+    # Only send a reference to a rung that advertises it. A model whose
+    # input_references minimum is 0 (ming-image-0.1-design) will reject the
+    # payload with a 400, so the walk below would recover - but only after a
+    # wasted round trip on every beat of every episode.
+    if reference_path and os.path.exists(reference_path) and _accepts_references(model):
         candidates.append({**base, "aspect_ratio": "9:16", "seed": seed, "n": 1,
                            "input_references": [
                                {"type": "image_url", "image_url": {"url": _write_data_url_image(reference_path)}}
                            ]})
+    elif reference_path and os.path.exists(reference_path):
+        print(f"i: {model} cannot take a reference image; rendering from text only")
     candidates.append({**base, "aspect_ratio": "9:16", "seed": seed, "n": 1})
     candidates.append({**base, "aspect_ratio": "9:16"})
     candidates.append(dict(base))
@@ -319,7 +363,7 @@ def generate_beat_image(
                     errors.append(f"pollinations: {exc}")
             elif key in IMAGE_LADDER:
                 try:
-                    _generate_via_openrouter(prompt, seed + attempt, out_path, reference_path)
+                    _generate_via_openrouter(prompt, seed + attempt, out_path, reference_path, IMAGE_LADDER[key])
                     log(f"  [image] {IMAGE_LADDER[key]} ok (seed {seed + attempt}, ref={'yes' if reference_path else 'no'})")
                     return out_path
                 except MediaGenerationError as exc:
