@@ -162,6 +162,41 @@
       ],
       "motion_score": 12.567637803819444,
       "created_at": "2026-10-16T08:12:53.482562+00:00"
+    },
+    {
+      "channel_key": "rabbit_channel",
+      "channel_name": "The Buns",
+      "hook_text": "LONG EARS",
+      "music_mood": "playful",
+      "cast": [
+        {
+          "id": "barnaby",
+          "name": "Barnaby",
+          "breed": "Holland Lop Rabbit",
+          "action": "nudging a full hay rack with his nose"
+        },
+        {
+          "id": "pip",
+          "name": "Pip",
+          "breed": "Lionhead Rabbit",
+          "action": "full zoomies across the jute rug"
+        },
+        {
+          "id": "clover",
+          "name": "Clover",
+          "breed": "Dutch Rabbit",
+          "action": "grooming her white face blaze"
+        }
+      ],
+      "video_url": "https://raw.githubusercontent.com/ATAD4NRY4N/pet-influencer-agency/main/docs/media/rabbit_channel_latest.mp4",
+      "watch_url": "https://atad4nry4n.github.io/pet-influencer-agency/watch/",
+      "live_beats": [
+        "beat1",
+        "beat2",
+        "beat3"
+      ],
+      "motion_score": 10.741322157118056,
+      "created_at": "2026-10-17T08:13:22.364455+00:00"
     }
   ]
 }
